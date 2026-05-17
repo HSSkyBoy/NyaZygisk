@@ -89,6 +89,11 @@ public:
     size_t size() const { return size_; }
     uint64_t total_appends() const { return total_appends_; }
     const AtexitEntry& operator[](size_t idx) const { return array_[idx]; }
+    bool isSane() const {
+        constexpr size_t MAX_REASONABLE_ATEXIT_ENTRIES = 4096 * 16;
+        return array_ != nullptr && size_ <= capacity_ && capacity_ < MAX_REASONABLE_ATEXIT_ENTRIES &&
+               extracted_count_ <= size_;
+    }
 
     void recompact();
 
@@ -110,7 +115,7 @@ private:
         return page_end_of_index(size_ - extracted_count_) < page_end_of_index(size_);
     }
 
-    void set_writable(bool writable, size_t start_idx, size_t num_entries);
+    bool set_writable(bool writable, size_t start_idx, size_t num_entries);
 };
 
 AtexitArray* findAtexitArray();

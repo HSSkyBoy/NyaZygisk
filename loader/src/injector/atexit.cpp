@@ -6,11 +6,26 @@
 namespace Atexit {
 
 void AtexitArray::recompact() {
+    if (!isSane()) {
+        LOGE("skip recompacting invalid atexit array: %s", format_state_string().c_str());
+        return;
+    }
+
+    if (size_ == 0) {
+        LOGV("skip recompacting empty atexit array");
+        return;
+    }
+
     if (!needs_recompaction()) {
         LOGV("needs_recompaction returns false");
     }
 
-    set_writable(true, 0, size_);
+    // Android 16 may place the live atexit backing storage on pages that we cannot
+    // temporarily flip writable. Treat recompaction as best-effort only.
+    if (!set_writable(true, 0, size_)) {
+        LOGW("skip recompacting atexit array because write access could not be enabled");
+        return;
+    }
 
     // Optimization: quickly skip over the initial non-null entries.
     size_t src = 0, dst = 0;
@@ -35,7 +50,9 @@ void AtexitArray::recompact() {
         madvise(reinterpret_cast<char *>(array_) + new_bytes, old_bytes - new_bytes, MADV_DONTNEED);
     }
 
-    set_writable(false, 0, size_);
+    if (!set_writable(false, 0, size_)) {
+        LOGW("failed to restore atexit array protection after recompaction");
+    }
 
     size_ = dst;
     extracted_count_ = 0;
@@ -44,8 +61,8 @@ void AtexitArray::recompact() {
 
 // Use mprotect to make the array writable or read-only. Returns true on success. Making the array
 // read-only could protect against either unintentional or malicious corruption of the array.
-void AtexitArray::set_writable(bool writable, size_t start_idx, size_t num_entries) {
-    if (array_ == nullptr) return;
+bool AtexitArray::set_writable(bool writable, size_t start_idx, size_t num_entries) {
+    if (array_ == nullptr) return false;
 
     const size_t start_byte = page_start_of_index(start_idx);
     const size_t stop_byte = page_end_of_index(start_idx + num_entries);
@@ -54,7 +71,9 @@ void AtexitArray::set_writable(bool writable, size_t start_idx, size_t num_entri
     const int prot = PROT_READ | (writable ? PROT_WRITE : 0);
     if (mprotect(reinterpret_cast<char *>(array_) + start_byte, byte_len, prot) != 0) {
         PLOGE("mprotect on atexit array");
+        return false;
     }
+    return true;
 }
 
 AtexitArray *findAtexitArray() {
@@ -89,12 +108,11 @@ AtexitArray *findAtexitArray() {
 
     // A sanity check to ensure we are pointing to a valid structure and not
     // garbage memory. An abnormally large size is a strong indicator of an error.
-    constexpr size_t MAX_REASONABLE_ATEXIT_ENTRIES = 4096 * 16;
-    if (g_array->size() < MAX_REASONABLE_ATEXIT_ENTRIES) {
+    if (g_array->isSane()) {
         LOGV("successfully validated atexit array at %p with size: %zu", g_array, g_array->size());
     } else {
-        LOGE("found atexit array symbol at %p, but its size (%zu) is unreasonably large", g_array,
-             g_array->size());
+        LOGE("found atexit array symbol at %p, but it failed sanity validation: %s", g_array,
+             g_array->format_state_string().c_str());
         return nullptr;
     }
 
