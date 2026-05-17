@@ -115,3 +115,4 @@ inline const char *sigabbrev_np(int sig) {
 
 std::string get_program(int pid);
 void *find_module_return_addr(const std::vector<MapInfo> &info, std::string_view suffix);
+bool atomic_write_file(const std::string &path, const std::string &data);

@@ -105,12 +105,13 @@ if [ "$KSU" ]; then
 fi
 
 ui_print "- Extracting module files"
-extract "$ZIPFILE" 'action.sh'     "$MODPATH"
-extract "$ZIPFILE" 'module.prop'     "$MODPATH"
-extract "$ZIPFILE" 'spoof.prop'      "$MODPATH"
-extract "$ZIPFILE" 'post-fs-data.sh' "$MODPATH"
-extract "$ZIPFILE" 'service.sh'      "$MODPATH"
+extract "$ZIPFILE" 'module.prop'       "$MODPATH"
+extract "$ZIPFILE" 'spoof.prop'        "$MODPATH"
+extract "$ZIPFILE" 'post-fs-data.sh'   "$MODPATH"
+extract "$ZIPFILE" 'service.sh'        "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'      "$MODPATH"
+ui_print "- Extracting WebUI files"
+unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH" >&2
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
 mkdir "$MODPATH/bin"
@@ -151,6 +152,7 @@ ui_print "- Setting permissions"
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 set_perm_recursive "$MODPATH/lib" 0 0 0755 0644 u:object_r:system_lib_file:s0
 set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
+set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)

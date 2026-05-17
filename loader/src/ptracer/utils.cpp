@@ -601,3 +601,32 @@ std::string get_program(int pid) {
     buf[sz] = 0;
     return buf;
 }
+
+bool atomic_write_file(const std::string &path, const std::string &data) {
+    std::string tmp_path = path + ".tmp";
+    int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd == -1) {
+        PLOGE("open %s", tmp_path.c_str());
+        return false;
+    }
+    ssize_t written = write(fd, data.c_str(), data.size());
+    if (written == -1 || static_cast<size_t>(written) != data.size()) {
+        PLOGE("write %s", tmp_path.c_str());
+        close(fd);
+        unlink(tmp_path.c_str());
+        return false;
+    }
+    if (fsync(fd) == -1) {
+        PLOGE("fsync %s", tmp_path.c_str());
+        close(fd);
+        unlink(tmp_path.c_str());
+        return false;
+    }
+    close(fd);
+    if (rename(tmp_path.c_str(), path.c_str()) == -1) {
+        PLOGE("rename %s to %s", tmp_path.c_str(), path.c_str());
+        unlink(tmp_path.c_str());
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F4F5F8">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0F1115">
+  <title>NyaZygisk</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header class="header">
+      <h1 class="title">NyaZygisk</h1>
+      <label class="lang-picker">
+        <span class="sr-only" data-i18n="language_aria">Language</span>
+        <select id="lang-select" aria-label="Language">
+          <option value="en">EN</option>
+          <option value="zh-Hant">TC</option>
+          <option value="zh-Hans">SC</option>
+        </select>
+      </label>
+    </header>
+
+    <section class="card">
+      <h2 class="card-title" data-i18n="status">Status</h2>
+      <div class="status-row">
+        <span class="label" data-i18n="monitor">Zygote Monitor</span>
+        <span class="value" id="v-monitor">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" id="l-zygote" data-i18n="zygote">Zygote</span>
+        <span class="value" id="v-zygote">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" id="l-daemon" data-i18n="daemon">Daemon</span>
+        <span class="value" id="v-daemon">-</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title" data-i18n="info">Basic Information</h2>
+      <div class="status-row">
+        <span class="label" data-i18n="version">Version</span>
+        <span class="value" id="v-version">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" data-i18n="root">Root</span>
+        <span class="value" id="v-root">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" data-i18n="kernel">Kernel</span>
+        <span class="value" id="v-kernel">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" data-i18n="sdk">Android SDK</span>
+        <span class="value" id="v-sdk">-</span>
+      </div>
+      <div class="status-row">
+        <span class="label" data-i18n="abi">ABI</span>
+        <span class="value" id="v-abi">-</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title-row">
+        <h2 class="card-title" data-i18n="modules">Active Modules</h2>
+        <span class="module-count" id="v-modules-count">0</span>
+      </div>
+      <div id="module-list" class="module-list empty" data-empty-key="none">None</div>
+    </section>
+
+    <div class="actions">
+      <button id="btn-reload" type="button" data-i18n="reload">Reload</button>
+    </div>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="kernelsu.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
