@@ -2,8 +2,8 @@
 ro.boot.vbmeta.device_state=locked
 ro.boot.verifiedbootstate=green
 ro.boot.flash.locked=1
-ro.boot.veritymode=enforcing
 ro.boot.warranty_bit=0
+ro.boot.veritymode=enforcing
 ro.warranty_bit=0
 ro.debuggable=0
 ro.force.debuggable=0

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <lsplt.hpp>
+#include <string_view>
 
 #include "daemon.hpp"
 #include "dl.hpp"
@@ -480,6 +481,20 @@ bool abort_zygote_unmount(const std::vector<mount_info> &traces, uint32_t info_f
         LOGV("abort unmounting zygote with an empty trace list");
         return true;
     }
+    auto starts_with = [](std::string_view value, std::string_view prefix) {
+        return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+    };
+    auto is_critical_font_target = [&](std::string_view target) {
+        return starts_with(target, "/system/fonts") ||
+               starts_with(target, "/system/font") ||
+               starts_with(target, "/system_ext/fonts") ||
+               starts_with(target, "/product/fonts") ||
+               starts_with(target, "/vendor/fonts") ||
+               starts_with(target, "/my_product/fonts") ||
+               starts_with(target, "/system/etc/fonts") ||
+               starts_with(target, "/system/etc/font");
+    };
+
     bool is_magisk = info_flags & PROCESS_ROOT_IS_MAGISK;
     for (const auto &trace : traces) {
         if (trace.target.rfind("/product", 0) == 0) {
@@ -487,6 +502,13 @@ bool abort_zygote_unmount(const std::vector<mount_info> &traces, uint32_t info_f
             if (!is_magisk && trace.target != "/product") continue;
             // workaround for zygote resource overlay (JingMatrix/NeoZygisk#26)
             LOGV("abort unmounting zygote due to prohibited target: [%s]", trace.raw_info.c_str());
+            return true;
+        }
+        if (is_critical_font_target(trace.target)) {
+            // Font overlay modules may mount files that the framework needs during early boot.
+            // Falling back to per-process setns is safer than detaching them from zygote.
+            LOGV("abort unmounting zygote due to critical font target: [%s]",
+                 trace.raw_info.c_str());
             return true;
         }
     }
@@ -565,3 +587,4 @@ bool ZygiskContext::update_mount_namespace(zygiskd::MountNamespace namespace_typ
     close(ns_fd);
     return true;
 }
+
