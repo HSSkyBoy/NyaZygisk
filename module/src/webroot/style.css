@@ -189,6 +189,18 @@ main {
   font-weight: 500;
 }
 
+.label.strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .value {
   text-align: right;
   font-weight: 600;
@@ -233,6 +245,63 @@ main {
   color: var(--text);
   white-space: nowrap;
   border: 1px solid var(--border);
+}
+
+.toggle-row {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+}
+
+.toggle-row input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch {
+  width: 50px;
+  height: 30px;
+  flex: 0 0 50px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  border: 1px solid var(--border);
+  position: relative;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.switch::after {
+  content: "";
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  transition: transform var(--transition);
+}
+
+.toggle-row input:checked + .switch {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle-row input:checked + .switch::after {
+  transform: translateX(20px);
+}
+
+.toggle-row input:focus-visible + .switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.toggle-row input:disabled + .switch {
+  opacity: 0.55;
 }
 
 .actions {

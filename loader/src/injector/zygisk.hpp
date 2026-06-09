@@ -27,7 +27,10 @@ void clean_libc_trace();
 void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded_modules,
                         bool unload_soinfo);
 
+bool is_anonymous_memory_enabled();
+
 void spoof_virtual_maps(const char *path, bool clear_write_permission);
+void spoof_module_maps(bool clear_write_permission);
 
 void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor);
 

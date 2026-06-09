@@ -1,6 +1,12 @@
 #include <linux/mman.h>
 #include <sys/mman.h>
 
+#include <array>
+#include <cstdio>
+#include <cstring>
+#include <span>
+#include <string>
+
 #include <lsplt.hpp>
 
 #include "atexit.hpp"
@@ -8,6 +14,8 @@
 #include "logging.hpp"
 #include "solist.hpp"
 #include "zygisk.hpp"
+
+constexpr const char *kConfigPath = "/data/adb/modules/zygisksu/config.prop";
 
 void clean_libc_trace() {
     auto g_array = Atexit::findAtexitArray();
@@ -29,37 +37,74 @@ void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded
     }
 }
 
-void spoof_virtual_maps(const char *path, bool clear_write_permission) {
+bool is_anonymous_memory_enabled() {
+    FILE *fp = fopen(kConfigPath, "r");
+    if (fp == nullptr) return false;
+
+    char line[128];
+    bool enabled = false;
+    while (fgets(line, sizeof(line), fp) != nullptr) {
+        char *end = line + strlen(line);
+        while (end > line && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' ||
+                              end[-1] == '\t')) {
+            *--end = '\0';
+        }
+        if (strcmp(line, "anonymous_memory=1") == 0) {
+            enabled = true;
+            break;
+        }
+    }
+    fclose(fp);
+    return enabled;
+}
+
+static void spoof_virtual_maps(std::span<const char *const> paths, bool clear_write_permission) {
     // spoofing map path names is futile in Android, we do it simply
     // to avoid trivial Zygisk detections based on string comparison.
     for (auto &map : lsplt::MapInfo::Scan()) {
         void *addr = (void *) map.start;
         size_t size = map.end - map.start;
 
-        if (strstr(map.path.c_str(), path)) {
+        bool should_spoof = false;
+        for (const char *path : paths) {
+            if (strstr(map.path.c_str(), path)) {
+                should_spoof = true;
+                break;
+            }
+        }
+
+        if (should_spoof) {
             LOGV("spoofing entry path contaning string %s", map.path.c_str());
-            // Create an anonymous mapping to hold a copy of the original data
             void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
             if (copy == MAP_FAILED) {
                 LOGE("failed to backup block %s [%p, %p]", map.path.c_str(), addr,
                      (void *) map.end);
                 continue;
             }
-            // Ensure the original mapping is readable before copying
+
             if ((map.perms & PROT_READ) == 0) {
-                mprotect(addr, size, PROT_READ);
+                if (mprotect(addr, size, map.perms | PROT_READ) == -1) {
+                    PLOGE("make entry readable before spoofing %s [%p, %p]", map.path.c_str(), addr,
+                          (void *) map.end);
+                    munmap(copy, size);
+                    continue;
+                }
             }
+
             memcpy(copy, addr, size);
-            // Overwrite the original mapping with our anonymous copy
-            if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) == MAP_FAILED) {
+
+            if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) != MAP_FAILED) {
+                LOGV("spoofed entry with anonymous memory %s [%p, %p]", map.path.c_str(), addr,
+                     (void *) map.end);
+            } else {
                 LOGE("mremap failed for %s [%p, %p]", map.path.c_str(), addr, (void *) map.end);
+                munmap(copy, size);
             }
-            // The backup copy is now at the original address, we can unmap our temporary one.
-            // Note: The man page for mremap is ambiguous on whether the old mapping at 'copy'
-            // is unmapped. To be safe and avoid potential leaks, we explicitly unmap it.
-            munmap(copy, size);
-            // Restore the original permissions
-            mprotect(addr, size, map.perms);
+
+            if (mprotect(addr, size, map.perms) == -1) {
+                PLOGE("restore permissions after spoofing %s [%p, %p]", map.path.c_str(), addr,
+                      (void *) map.end);
+            }
         }
 
         if (clear_write_permission && map.path.size() > 0 &&
@@ -76,6 +121,18 @@ void spoof_virtual_maps(const char *path, bool clear_write_permission) {
             }
         }
     }
+}
+
+void spoof_virtual_maps(const char *path, bool clear_write_permission) {
+    std::array paths{path};
+    spoof_virtual_maps(std::span<const char *const>(paths.data(), paths.size()),
+                       clear_write_permission);
+}
+
+void spoof_module_maps(bool clear_write_permission) {
+    constexpr std::array paths{"jit-cache-zygisk", "zygisk-module"};
+    spoof_virtual_maps(std::span<const char *const>(paths.data(), paths.size()),
+                       clear_write_permission);
 }
 
 void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor) {
