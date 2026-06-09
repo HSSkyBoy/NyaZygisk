@@ -205,7 +205,7 @@ void *find_module_return_addr(const std::vector<MapInfo> &info, std::string_view
  */
 void *find_module_base(const std::vector<MapInfo> &info, std::string_view suffix) {
     for (const auto &map : info) {
-        if (map.offset == 0 && map.path.ends_with(suffix)) {
+        if (map.offset == 0 && (map.path == suffix || map.path.ends_with(suffix))) {
             return (void *) map.start;
         }
     }
@@ -220,14 +220,15 @@ void *find_module_base(const std::vector<MapInfo> &info, std::string_view suffix
  * remote process. The remote address is then calculated using the offset from the base.
  * remote_sym = remote_base + (local_sym - local_base)
  */
-void *find_func_addr(const std::vector<MapInfo> &local_info,
-                     const std::vector<MapInfo> &remote_info, std::string_view module,
-                     std::string_view func) {
+static void *find_func_addr_from_loaded_module(const std::vector<MapInfo> &local_info,
+                                               const std::vector<MapInfo> &remote_info,
+                                               std::string_view module, std::string_view func) {
     auto lib = dlopen(module.data(), RTLD_NOW);
     if (lib == nullptr) {
         LOGE("failed to open lib %s: %s", module.data(), dlerror());
         return nullptr;
     }
+
     auto local_sym = reinterpret_cast<uintptr_t>(dlsym(lib, func.data()));
     dlclose(lib);  // Close the library handle immediately to avoid resource leaks.
     if (local_sym == 0) {
@@ -253,6 +254,140 @@ void *find_func_addr(const std::vector<MapInfo> &local_info,
          module.data(), func.data(), remote_addr, local_base, remote_base);
 
     return (void *) remote_addr;
+}
+
+static uintptr_t find_symbol_offset_from_file(std::string_view module, std::string_view func) {
+    std::string path(module);
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd == -1) {
+        PLOGE("open %s", path.c_str());
+        return 0;
+    }
+
+    struct stat st {};
+    if (fstat(fd, &st) == -1 || st.st_size <= 0) {
+        PLOGE("stat %s", path.c_str());
+        close(fd);
+        return 0;
+    }
+
+    std::vector<char> file(static_cast<size_t>(st.st_size));
+    char *cursor = file.data();
+    size_t remaining = file.size();
+    while (remaining > 0) {
+        ssize_t nread = read(fd, cursor, remaining);
+        if (nread <= 0) {
+            PLOGE("read %s", path.c_str());
+            close(fd);
+            return 0;
+        }
+        cursor += nread;
+        remaining -= static_cast<size_t>(nread);
+    }
+    close(fd);
+
+    if (file.size() < sizeof(ElfW(Ehdr))) return 0;
+    const auto *ehdr = reinterpret_cast<const ElfW(Ehdr) *>(file.data());
+    if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) return 0;
+
+    if (ehdr->e_phoff + ehdr->e_phnum * sizeof(ElfW(Phdr)) > file.size() ||
+        ehdr->e_shoff + ehdr->e_shnum * sizeof(ElfW(Shdr)) > file.size()) {
+        return 0;
+    }
+
+    uintptr_t load_bias = 0;
+    const auto *phdrs = reinterpret_cast<const ElfW(Phdr) *>(file.data() + ehdr->e_phoff);
+    for (int i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdrs[i].p_type == PT_LOAD) {
+            load_bias = static_cast<uintptr_t>(phdrs[i].p_vaddr - phdrs[i].p_offset);
+            break;
+        }
+    }
+
+    const auto *shdrs = reinterpret_cast<const ElfW(Shdr) *>(file.data() + ehdr->e_shoff);
+    for (int i = 0; i < ehdr->e_shnum; ++i) {
+        if (shdrs[i].sh_type != SHT_DYNSYM && shdrs[i].sh_type != SHT_SYMTAB) continue;
+        if (shdrs[i].sh_link >= ehdr->e_shnum || shdrs[i].sh_entsize == 0) continue;
+
+        const auto &strtab = shdrs[shdrs[i].sh_link];
+        if (shdrs[i].sh_offset + shdrs[i].sh_size > file.size() ||
+            strtab.sh_offset + strtab.sh_size > file.size()) {
+            continue;
+        }
+
+        const auto *symbols = reinterpret_cast<const ElfW(Sym) *>(file.data() + shdrs[i].sh_offset);
+        const char *strings = file.data() + strtab.sh_offset;
+        size_t count = shdrs[i].sh_size / shdrs[i].sh_entsize;
+        for (size_t j = 0; j < count; ++j) {
+            if (symbols[j].st_name >= strtab.sh_size) continue;
+            if (func == strings + symbols[j].st_name) {
+                return static_cast<uintptr_t>(symbols[j].st_value) - load_bias;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void *find_func_addr_from_file_module(const std::vector<MapInfo> &local_info,
+                                             const std::vector<MapInfo> &remote_info,
+                                             std::string_view module, std::string_view func) {
+    auto local_base = (uintptr_t) find_module_base(local_info, module);
+    if (local_base == 0) {
+        LOGE("failed to find local base for module %s", module.data());
+        return nullptr;
+    }
+
+    auto remote_base = (uintptr_t) find_module_base(remote_info, module);
+    if (remote_base == 0) {
+        LOGE("failed to find remote base for module %s", module.data());
+        return nullptr;
+    }
+
+    uintptr_t offset = find_symbol_offset_from_file(module, func);
+    if (offset == 0) {
+        LOGE("failed to find sym %s in %s", func.data(), module.data());
+        return nullptr;
+    }
+
+    uintptr_t remote_addr = remote_base + offset;
+    LOGV("found remote %s!%s at 0x%" PRIxPTR " (offset 0x%" PRIxPTR ")",
+         module.data(), func.data(), remote_addr, offset);
+    return (void *) remote_addr;
+}
+
+void *find_func_addr(const std::vector<MapInfo> &local_info,
+                     const std::vector<MapInfo> &remote_info, std::string_view module,
+                     std::string_view func) {
+    auto fallback_linker_dl_symbol = [&]() -> void * {
+        if (module != "libdl.so") return nullptr;
+
+        const char *linker_symbol = nullptr;
+        if (func == "dlopen") {
+            linker_symbol = "__dl_dlopen";
+        } else if (func == "dlsym") {
+            linker_symbol = "__dl_dlsym";
+        } else if (func == "dlerror") {
+            linker_symbol = "__dl_dlerror";
+        } else {
+            return nullptr;
+        }
+
+#if defined(__LP64__)
+        constexpr std::string_view linker = "/system/bin/linker64";
+#else
+        constexpr std::string_view linker = "/system/bin/linker";
+#endif
+
+        LOGV("falling back to linker symbol %s for libdl.so!%.*s", linker_symbol,
+             static_cast<int>(func.size()), func.data());
+        return find_func_addr_from_file_module(local_info, remote_info, linker, linker_symbol);
+    };
+
+    if (auto addr = find_func_addr_from_loaded_module(local_info, remote_info, module, func)) {
+        return addr;
+    }
+    return fallback_linker_dl_symbol();
 }
 
 // --- Remote Call Implementation ---

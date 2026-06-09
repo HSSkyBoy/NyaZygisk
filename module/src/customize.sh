@@ -67,9 +67,9 @@ VERSION=$(grep_prop version "${TMPDIR}/module.prop")
 ui_print "- Installing NyaZygisk $VERSION"
 
 # check android
-if [ "$API" -lt 26 ]; then
+if [ "$API" -lt 25 ]; then
   ui_print "! Unsupported sdk: $API"
-  abort "! Minimal supported sdk is 26 (Android 8.0)"
+  abort "! Minimal supported sdk is 25 (Android 7.1)"
 else
   ui_print "- Device sdk: $API"
 fi

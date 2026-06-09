@@ -425,9 +425,10 @@ public:
 
     /// @brief Gets a native pointer to an ArtMethod from a reflected Java method object.
     static ArtMethod* FromReflectedMethod(JNIEnv* env, jobject method) {
-        if (!art_method_field_id_) return nullptr;
-        jlong art_method_ptr = jni::GetLongField(env, method, art_method_field_id_);
-        return reinterpret_cast<ArtMethod*>(art_method_ptr);
+        if (!art_method_field_id_) {
+            return reinterpret_cast<ArtMethod*>(env->FromReflectedMethod(method));
+        }
+        return reinterpret_cast<ArtMethod*>(jni::GetLongField(env, method, art_method_field_id_));
     }
 
     /**
@@ -458,14 +459,14 @@ public:
 
         auto executable_class = jni::FindClass(env, "java/lang/reflect/Executable");
         if (!executable_class) {
-            LOGE("could not find java.lang.reflect.Executable");
-            return false;
-        }
-
-        art_method_field_id_ = jni::GetFieldID(env, executable_class, "artMethod", "J");
-        if (!art_method_field_id_) {
-            LOGE("failed to find field 'artMethod' in Executable class");
-            return false;
+            LOGW("could not find java.lang.reflect.Executable, falling back to FromReflectedMethod");
+            env->ExceptionClear();
+        } else {
+            art_method_field_id_ = jni::GetFieldID(env, executable_class, "artMethod", "J");
+            if (!art_method_field_id_) {
+                LOGW("failed to find field 'artMethod' in Executable class, falling back to FromReflectedMethod");
+                env->ExceptionClear();
+            }
         }
 
         auto throwable_class = jni::FindClass(env, "java/lang/Throwable");

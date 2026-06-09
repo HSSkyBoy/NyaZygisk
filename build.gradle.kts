@@ -31,7 +31,7 @@ val minMagiskVersion by extra(26402)
 val workDirectory by extra("/data/adb/neozygisk")
 val updateJson by extra("https://www.nkbe.top/nyazygisk/zygisk.json")
 
-val androidMinSdkVersion by extra(26)
+val androidMinSdkVersion by extra(25)
 val androidTargetSdkVersion by extra(36)
 val androidCompileSdkVersion by extra(36)
 val androidBuildToolsVersion by extra("36.1.0")
