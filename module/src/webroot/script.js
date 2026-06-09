@@ -16,6 +16,7 @@ const I18N = {
     daemon: "Daemon",
     version: "Version",
     root: "Root",
+    root_detect_failed: "Root detection failed",
     kernel: "Kernel",
     sdk: "Android SDK",
     abi: "ABI",
@@ -49,6 +50,7 @@ const I18N = {
     daemon: "\u5b88\u8b77\u7a0b\u5e8f",
     version: "\u7248\u672c",
     root: "Root \u65b9\u6848",
+    root_detect_failed: "Root \u6aa2\u6e2c\u5931\u6557",
     kernel: "\u6838\u5fc3",
     sdk: "Android SDK",
     abi: "ABI",
@@ -82,6 +84,7 @@ const I18N = {
     daemon: "\u5b88\u62a4\u8fdb\u7a0b",
     version: "\u7248\u672c",
     root: "Root \u65b9\u6848",
+    root_detect_failed: "Root \u68c0\u6d4b\u5931\u8d25",
     kernel: "\u5185\u6838",
     sdk: "Android SDK",
     abi: "ABI",
@@ -254,6 +257,66 @@ function parseModules(data) {
   return [];
 }
 
+function normalizeRootName(name) {
+  const normalized = String(name || "").trim();
+  const names = {
+    apatch: "APatch",
+    kernelsu: "KernelSU",
+    ksu: "KernelSU",
+    magisk: "Magisk",
+    sukisu: "SukiSU",
+  };
+  return names[normalized.toLowerCase()] || normalized;
+}
+
+function formatRootInfo(data, fallback) {
+  const name = normalizeRootName(data.root);
+  if (!name) {
+    return fallback || "-";
+  }
+
+  const parts = [];
+  if (data.version) {
+    parts.push(data.version);
+  }
+  if (data.kernel_version) {
+    parts.push(`kernel ${data.kernel_version}`);
+  }
+  if (data.manager_version) {
+    parts.push(`manager ${data.manager_version}`);
+  }
+
+  return parts.length ? `${name} ${parts.join(" / ")}` : name;
+}
+
+function rootDetectionCommand() {
+  return [
+    "detect_root() {",
+    "  if command -v apd >/dev/null 2>&1 || [ -n \"${APATCH_VER_CODE:-}\" ] || [ -d /data/adb/ap ]; then",
+    "    echo root=APatch",
+    "    if [ -n \"${APATCH_VER_CODE:-}\" ]; then echo version=$APATCH_VER_CODE; fi",
+    "    if command -v apd >/dev/null 2>&1; then apd -V 2>/dev/null | head -n 1 | sed 's/^/version_text=/'; fi",
+    "    return",
+    "  fi",
+    "  if command -v ksud >/dev/null 2>&1 || [ -n \"${KSU:-}\" ] || [ -d /data/adb/ksu ]; then",
+    "    echo root=KernelSU",
+    "    if [ -n \"${KSU_KERNEL_VER_CODE:-}\" ]; then echo kernel_version=$KSU_KERNEL_VER_CODE; fi",
+    "    if [ -n \"${KSU_VER_CODE:-}\" ]; then echo manager_version=$KSU_VER_CODE; fi",
+    "    if command -v ksud >/dev/null 2>&1; then ksud -V 2>/dev/null | head -n 1 | sed 's/^/version_text=/'; fi",
+    "    return",
+    "  fi",
+    "  if command -v magisk >/dev/null 2>&1; then",
+    "    echo root=Magisk",
+    "    magisk -V 2>/dev/null | head -n 1 | sed 's/^/version=/'",
+    "    magisk -v 2>/dev/null | head -n 1 | sed 's/^/version_text=/'",
+    "    return",
+    "  fi",
+    "  echo root=Unknown",
+    "}",
+    "detect_root",
+  ].join("\n");
+}
+
 function showToast(key, isError = false) {
   const toast = $("toast");
   toast.textContent = t(key);
@@ -301,11 +364,40 @@ async function refresh(showSuccessToast) {
   const modules = parseModules(data);
   $("v-modules-count").textContent = String(data.modules_count || modules.length || 0);
   renderModules(modules);
+  await refreshRootInfo(data.root_implementation);
   await refreshConfig();
 
   if (showSuccessToast) {
     showToast("reloaded");
   }
+}
+
+async function refreshRootInfo(fallback) {
+  const exec = window.NeoZygiskWebUi && window.NeoZygiskWebUi.exec;
+  if (typeof exec !== "function") {
+    $("v-root").textContent = fallback || "-";
+    return;
+  }
+
+  const result = await exec(rootDetectionCommand());
+  if (result.code !== 0) {
+    $("v-root").textContent = fallback || t("root_detect_failed");
+    return;
+  }
+
+  const data = parseProp(result.stdout);
+  if (!data.root || data.root === "Unknown") {
+    $("v-root").textContent = fallback || "-";
+    return;
+  }
+
+  const versionText = data.version_text && !data.version ? data.version_text : "";
+  $("v-root").textContent = formatRootInfo({
+    root: data.root,
+    version: data.version || versionText,
+    kernel_version: data.kernel_version,
+    manager_version: data.manager_version,
+  }, fallback);
 }
 
 async function refreshConfig() {
