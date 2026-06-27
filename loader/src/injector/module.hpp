@@ -48,6 +48,7 @@ struct AppSpecializeArgs_v3 {
     jstring &instruction_set;
     jstring &app_data_dir;
 
+    jintArray *fds_to_close = nullptr;
     jintArray *fds_to_ignore = nullptr;
     jboolean *is_child_zygote = nullptr;
     jboolean *is_top_app = nullptr;
@@ -296,6 +297,7 @@ struct ZygiskContext {
     DCL_PRE_POST(nativeSpecializeAppProcess)
     DCL_PRE_POST(nativeForkSystemServer)
 
+    void sanitize_fds_to_close();
     void sanitize_fds();
     bool exempt_fd(int fd);
     bool can_exempt_fd() const;

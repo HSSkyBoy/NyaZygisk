@@ -3,6 +3,7 @@
 #include <android/dlext.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -39,6 +40,12 @@ static inline int fast_atoi(const char* str) {
 }
 
 using namespace std;
+
+static bool is_missing_path(const char *path) {
+    struct stat st {};
+    if (stat(path, &st) == 0) return false;
+    return errno == ENOENT || errno == ENOTDIR;
+}
 
 ZygiskModule::ZygiskModule(int id, void *handle, void *entry)
     : id(id), handle(handle), entry{entry}, api{}, mod{nullptr} {
@@ -268,6 +275,73 @@ void ZygiskContext::sanitize_fds() {
     }
 }
 
+void ZygiskContext::sanitize_fds_to_close() {
+    if (!is_child() || !args.app->fds_to_close || !(g_hook->zygote_unmounted_times > 0)) {
+        return;
+    }
+
+    std::vector<jint> inherited_fds_to_close;
+    if (jintArray existing = *args.app->fds_to_close) {
+        const jsize len = env->GetArrayLength(existing);
+        if (len > 0) {
+            inherited_fds_to_close.resize(static_cast<size_t>(len));
+            env->GetIntArrayRegion(existing, 0, len, inherited_fds_to_close.data());
+        }
+    }
+
+    auto already_marked = [&](jint fd) {
+        return std::find(inherited_fds_to_close.begin(), inherited_fds_to_close.end(), fd) !=
+               inherited_fds_to_close.end();
+    };
+
+    int fd_dir = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    if (fd_dir < 0) return;
+
+    std::vector<jint> inaccessible_fds;
+    char buf[4096];
+    int nread;
+    while ((nread = syscall(__NR_getdents64, fd_dir, buf, sizeof(buf))) > 0) {
+        for (int bpos = 0; bpos < nread;) {
+            auto d = reinterpret_cast<struct linux_dirent64 *>(buf + bpos);
+            if (d->d_name[0] >= '0' && d->d_name[0] <= '9') {
+                int fd = fast_atoi(d->d_name);
+                if (fd != fd_dir && fd >= 0 && static_cast<size_t>(fd) < allowed_fds.size() &&
+                    allowed_fds[fd] && !already_marked(fd)) {
+                    char fd_path[64];
+                    char target[PATH_MAX];
+                    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+                    ssize_t len = readlink(fd_path, target, sizeof(target) - 1);
+                    if (len > 0) {
+                        target[len] = '\0';
+                        if (target[0] == '/' && is_missing_path(target)) {
+                            inaccessible_fds.push_back(fd);
+                        }
+                    }
+                }
+            }
+            bpos += d->d_reclen;
+        }
+    }
+    close(fd_dir);
+
+    if (inaccessible_fds.empty()) return;
+
+    const jsize old_len = static_cast<jsize>(inherited_fds_to_close.size());
+    jintArray merged = env->NewIntArray(old_len + static_cast<jsize>(inaccessible_fds.size()));
+    if (!merged) return;
+
+    if (old_len > 0) {
+        env->SetIntArrayRegion(merged, 0, old_len, inherited_fds_to_close.data());
+    }
+    env->SetIntArrayRegion(merged, old_len, static_cast<jsize>(inaccessible_fds.size()),
+                           inaccessible_fds.data());
+    *args.app->fds_to_close = merged;
+
+    for (jint fd : inaccessible_fds) {
+        LOGV("marking inaccessible zygote fd %d for detach before reopen", fd);
+    }
+}
+
 bool ZygiskContext::exempt_fd(int fd) {
     if ((flags & POST_SPECIALIZE) || (flags & SKIP_CLOSE_LOG_PIPE)) return true;
     if (!can_exempt_fd()) return false;
@@ -482,37 +556,7 @@ bool abort_zygote_unmount(const std::vector<mount_info> &traces, uint32_t info_f
         LOGV("abort unmounting zygote with an empty trace list");
         return true;
     }
-    auto starts_with = [](std::string_view value, std::string_view prefix) {
-        return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
-    };
-    auto is_critical_font_target = [&](std::string_view target) {
-        return starts_with(target, "/system/fonts") ||
-               starts_with(target, "/system/font") ||
-               starts_with(target, "/system_ext/fonts") ||
-               starts_with(target, "/product/fonts") ||
-               starts_with(target, "/vendor/fonts") ||
-               starts_with(target, "/my_product/fonts") ||
-               starts_with(target, "/system/etc/fonts") ||
-               starts_with(target, "/system/etc/font");
-    };
-
-    bool is_magisk = info_flags & PROCESS_ROOT_IS_MAGISK;
-    for (const auto &trace : traces) {
-        if (trace.target.rfind("/product", 0) == 0) {
-            if (trace.target.rfind("/product/bin", 0) == 0) continue;
-            if (!is_magisk && trace.target != "/product") continue;
-            // workaround for zygote resource overlay (JingMatrix/NeoZygisk#26)
-            LOGV("abort unmounting zygote due to prohibited target: [%s]", trace.raw_info.c_str());
-            return true;
-        }
-        if (is_critical_font_target(trace.target)) {
-            // Font overlay modules may mount files that the framework needs during early boot.
-            // Falling back to per-process setns is safer than detaching them from zygote.
-            LOGV("abort unmounting zygote due to critical font target: [%s]",
-                 trace.raw_info.c_str());
-            return true;
-        }
-    }
+    (void) info_flags;
     return false;
 }
 
@@ -548,6 +592,7 @@ void ZygiskContext::nativeForkAndSpecialize_pre() {
 
     fork_pre();
     if (is_child()) {
+        sanitize_fds_to_close();
         app_specialize_pre();
     }
 

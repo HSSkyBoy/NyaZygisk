@@ -128,7 +128,7 @@ rlimits = Argument('rlimits', JArray(jintArray))
 mount_external = Argument('mount_external', jint)
 se_info = Argument('se_info', jstring)
 nice_name = Argument('nice_name', jstring)
-fds_to_close = Argument('fds_to_close', jintArray)
+fds_to_close = Argument('fds_to_close', jintArray, True)
 instruction_set = Argument('instruction_set', jstring)
 app_data_dir = Argument('app_data_dir', jstring)
 
