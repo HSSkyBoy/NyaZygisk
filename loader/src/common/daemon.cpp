@@ -25,6 +25,11 @@ struct ShmLayout {
     std::atomic<uint32_t> version;
     ShmEntry entries[SHM_HASH_MAP_SIZE];
 };
+
+static_assert(std::atomic<uint32_t>::is_always_lock_free);
+static_assert(alignof(std::atomic<uint32_t>) == alignof(uint32_t));
+static_assert(sizeof(ShmEntry) == sizeof(uint32_t) * 2);
+static_assert(sizeof(ShmLayout) == sizeof(uint32_t) * (1 + SHM_HASH_MAP_SIZE * 2));
 }  // namespace constants
 
 namespace zygiskd {
@@ -119,7 +124,10 @@ uint32_t GetProcessFlags(uid_t uid) {
             } while (index != start);
 
             if (found) {
-                uint32_t version_after = g_shm_base->version.load(std::memory_order_acquire);
+                // Keep entry reads ahead of the validation load on weakly ordered CPUs.
+                std::atomic_thread_fence(std::memory_order_acquire);
+                uint32_t version_after =
+                    g_shm_base->version.load(std::memory_order_relaxed);
                 if (version_before == version_after) {
                     return cached_flags;
                 }

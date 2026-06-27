@@ -75,7 +75,8 @@ static void spoof_virtual_maps(std::span<const char *const> paths, bool clear_wr
 
         if (should_spoof) {
             LOGV("spoofing entry path contaning string %s", map.path.c_str());
-            void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            void *copy = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
             if (copy == MAP_FAILED) {
                 LOGE("failed to backup block %s [%p, %p]", map.path.c_str(), addr,
                      (void *) map.end);
@@ -93,17 +94,29 @@ static void spoof_virtual_maps(std::span<const char *const> paths, bool clear_wr
 
             memcpy(copy, addr, size);
 
+            // Move the replacement with its final permissions already applied. This avoids a
+            // window where executable mappings would temporarily become write-only.
+            if (mprotect(copy, size, map.perms) == -1) {
+                PLOGE("set replacement permissions before spoofing %s [%p, %p]",
+                      map.path.c_str(), addr, (void *) map.end);
+                munmap(copy, size);
+                if ((map.perms & PROT_READ) == 0 && mprotect(addr, size, map.perms) == -1) {
+                    PLOGE("restore permissions after failed spoof preparation %s [%p, %p]",
+                          map.path.c_str(), addr, (void *) map.end);
+                }
+                continue;
+            }
+
             if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) != MAP_FAILED) {
                 LOGV("spoofed entry with anonymous memory %s [%p, %p]", map.path.c_str(), addr,
                      (void *) map.end);
             } else {
                 LOGE("mremap failed for %s [%p, %p]", map.path.c_str(), addr, (void *) map.end);
                 munmap(copy, size);
-            }
-
-            if (mprotect(addr, size, map.perms) == -1) {
-                PLOGE("restore permissions after spoofing %s [%p, %p]", map.path.c_str(), addr,
-                      (void *) map.end);
+                if ((map.perms & PROT_READ) == 0 && mprotect(addr, size, map.perms) == -1) {
+                    PLOGE("restore permissions after failed spoofing %s [%p, %p]",
+                          map.path.c_str(), addr, (void *) map.end);
+                }
             }
         }
 

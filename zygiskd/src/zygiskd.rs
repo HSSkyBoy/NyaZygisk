@@ -27,7 +27,7 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::Command,
-    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
+    sync::{atomic::{fence, Ordering}, Arc, Mutex, OnceLock},
     thread,
 };
 
@@ -62,8 +62,9 @@ unsafe impl Send for SharedShm {}
 unsafe impl Sync for SharedShm {}
 
 impl SharedShm {
-    fn layout_mut(&self) -> &mut constants::ShmLayout {
-        unsafe { &mut *self.layout }
+    fn layout(&self) -> &constants::ShmLayout {
+        // The mapping outlives this object and every shared field is accessed atomically.
+        unsafe { &*self.layout }
     }
 }
 
@@ -601,11 +602,13 @@ fn initialize_shared_memory() -> Result<()> {
 fn cache_process_flags(uid: u32, flags: u32) {
     if let Some(shm) = SHARED_MEMORY.get() {
         let _guard = shm.write_lock.lock().unwrap();
-        let layout = shm.layout_mut();
+        let layout = shm.layout();
         let base_version = layout.version.load(Ordering::Relaxed);
         layout
             .version
-            .store(base_version.wrapping_add(1), Ordering::Release);
+            .store(base_version.wrapping_add(1), Ordering::Relaxed);
+        // Publish the odd version before any entry update becomes visible.
+        fence(Ordering::Release);
 
         let mask = constants::SHM_HASH_MAP_SIZE - 1;
         let mut index = (uid as usize) & mask;

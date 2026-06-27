@@ -430,6 +430,7 @@ void ZygiskContext::server_specialize_post() { run_modules_post(); }
 void ZygiskContext::nativeSpecializeAppProcess_pre() {
     process = env->GetStringUTFChars(args.app->nice_name, nullptr);
     LOGV("pre specialize [%s]", process);
+    g_hook->anonymous_memory_enabled = is_anonymous_memory_enabled();
     // App specialize does not check FD
     flags |= SKIP_CLOSE_LOG_PIPE;
     app_specialize_pre();
@@ -518,6 +519,7 @@ bool abort_zygote_unmount(const std::vector<mount_info> &traces, uint32_t info_f
 void ZygiskContext::nativeForkAndSpecialize_pre() {
     process = env->GetStringUTFChars(args.app->nice_name, nullptr);
     LOGV("pre forkAndSpecialize [%s]", process);
+    g_hook->anonymous_memory_enabled = is_anonymous_memory_enabled();
     flags |= APP_FORK_AND_SPECIALIZE;
 
     if (g_hook->zygote_unmounted_times < 5 && g_hook->zygote_traces.size() == 0) {

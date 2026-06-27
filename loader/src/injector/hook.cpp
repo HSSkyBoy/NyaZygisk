@@ -239,7 +239,7 @@ DCL_HOOK_FUNC(static int, pthread_attr_setstacksize, void *target, size_t size) 
             void *start_addr = g_hook->start_addr;
             size_t block_size = g_hook->block_size;
 
-            if (g_hook->should_spoof_maps && is_anonymous_memory_enabled()) {
+            if (g_hook->should_spoof_maps && g_hook->anonymous_memory_enabled) {
                 spoof_module_maps(true);
             }
 

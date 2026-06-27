@@ -322,6 +322,7 @@ struct HookContext {
     void *start_addr = nullptr;
     size_t block_size = 0;
     bool should_spoof_maps = false;
+    bool anonymous_memory_enabled = false;
     bool should_unmap = false;
     bool skip_hooking_unloader = false;
     size_t zygote_unmounted_times = 0;
