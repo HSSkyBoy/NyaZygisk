@@ -1,4 +1,10 @@
 name: CI
+run-name: >-
+  ${{
+    github.event_name == 'push'
+    && github.event.head_commit.message
+    || format('CI #{0} - {1}', github.run_number, github.actor)
+  }}
 
 on:
   workflow_dispatch:
@@ -132,27 +138,50 @@ jobs:
           fi
 
           COMMIT_MESSAGE=$(git log -1 --pretty=%B 2>/dev/null || echo "No commit message")
+          PRIMARY_AUTHOR=$(git log -1 --pretty=%an 2>/dev/null || echo "Unknown")
 
           # HTML 特殊字元跳脫
           escape_html() {
             sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
           }
+          trim_caption_message() {
+            local text="$1"
+            local limit="$2"
+
+            if [ "$limit" -le 0 ]; then
+              printf ''
+              return
+            fi
+
+            if [ "${#text}" -le "$limit" ]; then
+              printf '%s' "$text"
+              return
+            fi
+
+            if [ "$limit" -le 3 ]; then
+              printf '%.*s' "$limit" '...'
+              return
+            fi
+
+            printf '%s...' "${text:0:$((limit - 3))}"
+          }
           SAFE_TITLE=$(printf '%s' "$TITLE" | escape_html)
           SAFE_BRANCH=$(printf '%s' "$BRANCH" | escape_html)
-          SAFE_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | escape_html)
+          SAFE_PRIMARY_AUTHOR=$(printf '%s' "$PRIMARY_AUTHOR" | escape_html)
+          SAFE_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | sed -e 's/\r//g' | escape_html)
 
           NL=$'\n'
-          CAPTION="<b>${SAFE_TITLE}</b>${NL}"
-          CAPTION+="Branch: ${SAFE_BRANCH}${NL}"
-          CAPTION+="#ci_${VERSION}${NL}${NL}"
-          CAPTION+="<blockquote>${SAFE_MESSAGE}</blockquote>${NL}${NL}"
-          CAPTION+="<a href=\"${COMMIT_URL}\">Commit</a>${NL}"
-          CAPTION+="<a href=\"${RUN_URL}\">Workflow run</a>"
-
-          if [ ${#CAPTION} -gt 1024 ]; then
-            echo "::warning::Caption exceeds 1024 chars, falling back to commit URL"
-            CAPTION="${COMMIT_URL}"
-          fi
+          CAPTION_PREFIX="<b>${SAFE_TITLE}</b>${NL}"
+          CAPTION_PREFIX+="Author: ${SAFE_PRIMARY_AUTHOR}${NL}"
+          CAPTION_PREFIX+="Branch: ${SAFE_BRANCH}${NL}"
+          CAPTION_PREFIX+="Run: #ci_${VERSION}${NL}${NL}"
+          CAPTION_SUFFIX="${NL}${NL}<a href=\"${COMMIT_URL}\">Commit</a>${NL}"
+          CAPTION_SUFFIX+="<a href=\"${RUN_URL}\">Workflow run</a>"
+          MAX_CAPTION_LENGTH=1024
+          MESSAGE_WRAPPER_LENGTH=24
+          AVAILABLE_MESSAGE_LENGTH=$((MAX_CAPTION_LENGTH - ${#CAPTION_PREFIX} - ${#CAPTION_SUFFIX} - MESSAGE_WRAPPER_LENGTH))
+          SAFE_MESSAGE=$(trim_caption_message "$SAFE_MESSAGE" "$AVAILABLE_MESSAGE_LENGTH")
+          CAPTION="${CAPTION_PREFIX}<blockquote>${SAFE_MESSAGE}</blockquote>${CAPTION_SUFFIX}"
 
           CURL_ARGS=(
             --silent --show-error --fail
