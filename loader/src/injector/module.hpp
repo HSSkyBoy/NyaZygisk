@@ -297,7 +297,6 @@ struct ZygiskContext {
     DCL_PRE_POST(nativeSpecializeAppProcess)
     DCL_PRE_POST(nativeForkSystemServer)
 
-    void sanitize_fds_to_close();
     void sanitize_fds();
     bool exempt_fd(int fd);
     bool can_exempt_fd() const;
