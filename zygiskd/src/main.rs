@@ -139,6 +139,9 @@ fn main_daemon_entry(tmp_path: Option<&str>) -> anyhow::Result<()> {
     // Detect and globally set the root implementation.
     root_impl::setup();
     log::info!("Current root implementation: {:?}", root_impl::get());
+    // NyaZygisk owns mount cleanup for app processes. Keep the root solution from
+    // performing the same work independently before our namespace policy runs.
+    root_impl::take_over_umount();
     zygiskd::main(tmp_path)
 }
 

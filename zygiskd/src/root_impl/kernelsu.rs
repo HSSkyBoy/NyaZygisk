@@ -15,7 +15,7 @@
 //! avoiding any repeated detection overhead.
 
 use crate::constants::{MAX_KSU_VERSION, MIN_KSU_VERSION};
-use log::warn;
+use log::{info, warn};
 use std::ffi::c_char;
 use std::fs;
 use std::os::fd::RawFd;
@@ -81,6 +81,10 @@ const KSU_IOCTL_GET_INFO: u32 = 0x80004B02;          // nr=2, dir=R
 const KSU_IOCTL_UID_GRANTED_ROOT: u32 = 0xC0004B08;  // nr=8, dir=RW
 const KSU_IOCTL_UID_SHOULD_UMOUNT: u32 = 0xC0004B09; // nr=9, dir=RW
 const KSU_IOCTL_GET_MANAGER_UID: u32 = 0x80004B0A;   // nr=10, dir=R
+const KSU_IOCTL_SET_FEATURE: u32 = 0x40004B0E;       // nr=14, dir=W
+
+/// KernelSU feature identifier for in-kernel per-app module unmounting.
+const KSU_FEATURE_KERNEL_UMOUNT: u32 = 1;
 
 /// Data structures for ioctl commands.
 /// The `#[repr(C)]` attribute is critical to ensure that the memory layout of these
@@ -108,6 +112,13 @@ struct KsuUidShouldUmountCmd {
 #[repr(C)]
 struct KsuGetManagerUidCmd {
     uid: u32,
+}
+
+/// Mirrors `struct ksu_set_feature_cmd` from KernelSU's UAPI.
+#[repr(C)]
+struct KsuSetFeatureCmd {
+    feature_id: u32,
+    value: u64,
 }
 
 // --- Legacy `prctl` Interface Constants ---
@@ -266,6 +277,29 @@ pub fn uid_is_manager(uid: i32) -> bool {
     }
 }
 
+/// Toggles KernelSU's in-kernel per-app module unmount (`kernel_umount`).
+///
+/// NeoZygisk unmounts module traces itself, so the kernel feature must be turned off:
+/// leaving it on would let the kernel unmount in parallel with — and out of step with —
+/// our own logic (for example the `/product` resource-overlay carve-out we deliberately
+/// keep, see JingMatrix/NeoZygisk#26).
+///
+/// Only modern (ioctl) KernelSU exposes this feature; on legacy prctl KernelSU or any
+/// other root solution this is a no-op returning `false`.
+pub fn disable_kernel_umount() {
+    let Some(result) = KSU_RESULT.get().and_then(|result| result.as_ref()) else {
+        return;
+    };
+    let Method::Ioctl(fd) = result.method else {
+        return;
+    };
+
+    match set_feature_ioctl(fd, KSU_FEATURE_KERNEL_UMOUNT, 0) {
+        Ok(()) => info!("KernelSU kernel_umount disabled; NyaZygisk owns mount cleanup"),
+        Err(error) => warn!("Failed to disable KernelSU kernel_umount: {}", error),
+    }
+}
+
 // --- `ioctl` Implementation Details ---
 
 /// Scans `/proc/self/fd` to find an existing driver file descriptor.
@@ -316,6 +350,12 @@ fn ksuctl_ioctl<T>(fd: RawFd, request: u32, arg: *mut T) -> std::io::Result<()> 
     } else {
         Ok(())
     }
+}
+
+/// Updates a KernelSU feature through the modern ioctl interface.
+fn set_feature_ioctl(fd: RawFd, feature_id: u32, value: u64) -> std::io::Result<()> {
+    let mut cmd = KsuSetFeatureCmd { feature_id, value };
+    ksuctl_ioctl(fd, KSU_IOCTL_SET_FEATURE, &mut cmd)
 }
 
 /// `ioctl` implementation for checking if a UID has root.

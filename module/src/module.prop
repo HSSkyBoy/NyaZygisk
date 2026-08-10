@@ -6,3 +6,4 @@ author=JingMatrix, NkBe
 description=Zygote injection with ptrace.
 updateJson=${updateJson}
 banner=https://www.nkbe.top/nyazygisk/banner.png
+managedFeatures=kernel_umount
