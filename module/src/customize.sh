@@ -105,11 +105,12 @@ if [ "$KSU" ]; then
 fi
 
 ui_print "- Extracting module files"
-extract "$ZIPFILE" 'module.prop'       "$MODPATH"
-extract "$ZIPFILE" 'spoof.prop'        "$MODPATH"
-extract "$ZIPFILE" 'post-fs-data.sh'   "$MODPATH"
-extract "$ZIPFILE" 'service.sh'        "$MODPATH"
-extract "$ZIPFILE" 'uninstall.sh'      "$MODPATH"
+extract "$ZIPFILE" 'module.prop'               "$MODPATH"
+extract "$ZIPFILE" 'spoof.prop'                "$MODPATH"
+extract "$ZIPFILE" 'post-fs-data.sh'           "$MODPATH"
+extract "$ZIPFILE" 'service.sh'                "$MODPATH"
+extract "$ZIPFILE" 'uninstall.sh'              "$MODPATH"
+extract "$ZIPFILE" 'emulated-soft-reboot.sh'   "$MODPATH"
 ui_print "- Extracting WebUI files"
 unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH" >&2
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
