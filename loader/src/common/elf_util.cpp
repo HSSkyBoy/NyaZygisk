@@ -173,7 +173,7 @@ ElfImage::~ElfImage() {
     if (file_) munmap(file_, file_size_);
 }
 
-void ElfImage::parseSymbols(const ElfW(Shdr)* sym_sh, const ElfW(Shdr)* str_sh, const char* strtab,
+void ElfImage::parseSymbols(const ElfW(Shdr)* str_sh, const char* strtab,
                             const ElfW(Sym)* symtab, size_t count, uintptr_t bias) const {
     if (!strtab || !symtab) return;
     for (size_t i = 0; i < count; ++i) {
@@ -234,7 +234,7 @@ void ElfImage::ensureParsed() const {
             const char* strtab = reinterpret_cast<const char*>(file_ + str_sh.sh_offset);
             const ElfW(Sym)* symtab = reinterpret_cast<const ElfW(Sym)*>(file_ + sh.sh_offset);
             size_t count = (sh.sh_entsize) ? sh.sh_size / sh.sh_entsize : 0;
-            parseSymbols(&sh, &str_sh, strtab, symtab, count, bias);
+            parseSymbols(&str_sh, strtab, symtab, count, bias);
         } else if (sh.sh_type == SHT_PROGBITS && strcmp(sec_name(sh), ".gnu_debugdata") == 0 &&
                    sh.sh_offset + sh.sh_size <= file_size_) {
             parseGnuDebugData(file_ + sh.sh_offset, sh.sh_size);
@@ -247,11 +247,6 @@ void ElfImage::ensureParsed() const {
         const ElfW(Shdr)* dshdrs =
             reinterpret_cast<const ElfW(Shdr)*>(debugdata_.data() + deh->e_shoff);
         const size_t dshnum = deh->e_shnum;
-        const char* dsecnames = nullptr;
-        if (deh->e_shstrndx != SHN_UNDEF && deh->e_shstrndx < dshnum) {
-            const ElfW(Shdr)& dsstr = dshdrs[deh->e_shstrndx];
-            dsecnames = reinterpret_cast<const char*>(debugdata_.data() + dsstr.sh_offset);
-        }
         for (size_t i = 0; i < dshnum; ++i) {
             const ElfW(Shdr)& sh = dshdrs[i];
             if (sh.sh_type != SHT_SYMTAB) continue;
@@ -260,7 +255,7 @@ void ElfImage::ensureParsed() const {
             const char* strtab = reinterpret_cast<const char*>(debugdata_.data() + str_sh.sh_offset);
             const ElfW(Sym)* symtab = reinterpret_cast<const ElfW(Sym)*>(debugdata_.data() + sh.sh_offset);
             size_t count = (sh.sh_entsize) ? sh.sh_size / sh.sh_entsize : 0;
-            parseSymbols(&sh, &str_sh, strtab, symtab, count, bias);
+            parseSymbols(&str_sh, strtab, symtab, count, bias);
         }
     }
 
