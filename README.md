@@ -1,18 +1,21 @@
 # NyaZygisk
 
-NyaZygisk is a Zygote injection module, implemented via [`ptrace`](https://man7.org/linux/man-pages/man2/ptrace.2.html), that provides Zygisk API support for APatch and KernelSU.
-It also functions as a powerful replacement for Magisk's built-in Zygisk.
+NyaZygisk is a Zygote and process injection framework, implemented via [`ptrace`](https://man7.org/linux/man-pages/man2/ptrace.2.html), that provides both **Magisk Zygisk API** and **Zygisk Next (ZN) API** support for APatch, KernelSU, and Magisk.
+It also functions as a powerful, feature-rich replacement for Magisk's built-in Zygisk.
 
-This project is a fork of [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk).
+This project is a fork of [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk), extended with dual-engine module loading and Zygisk Next API compatibility.
 
 ## Core Principles
 
-NyaZygisk is engineered with four key objectives:
+NyaZygisk is engineered with key objectives:
 
-1.  **API Compatibility:** Maintains full API compatibility with [Magisk's built-in Zygisk](https://github.com/topjohnwu/Magisk/tree/master/native/src/core/zygisk). The relevant API designs are mirrored in the source folder [injector](https://github.com/HSSkyBoy/NyaZygisk/tree/master/loader/src/injector) for reference.
-2.  **Minimalist Design:** Focuses on a lean and efficient implementation of the Zygisk API, avoiding feature bloat to ensure stability and performance.
+1.  **Dual API Compatibility:** 
+    * **Magisk Zygisk API:** Full compatibility with [Magisk's built-in Zygisk](https://github.com/topjohnwu/Magisk/tree/master/native/src/core/zygisk) modules (`zygisk_module_entry`).
+    * **Zygisk Next API:** Full compatibility with Zygisk Next (ZN) API (v1 ~ v4) modules (`zn_modules.txt`), providing `inlineHook` ([Dobby](https://github.com/LSPosed/Dobby)), `pltHook` ([LSPlt](https://github.com/LSPosed/LSPlt)), comprehensive ELF symbol resolution with `.gnu_debugdata` LZMA decompression, and companion process management.
+2.  **Minimalist Design:** Focuses on a lean and efficient implementation of the injection and module loading engines, avoiding feature bloat to ensure stability and performance.
 3.  **Trace Cleaning:** Guarantees the complete removal of its injection traces from application processes once all Zygisk modules are unloaded.
 4.  **Advanced Stealth:** Employs a sophisticated DenyList to provide granular control over root and module visibility, effectively hiding the traces of your root solution.
+5.  **Modern WebUI Integration:** Built-in WebUI dashboard providing real-time status monitoring, distinguishing active modules by type (`[Zygisk]` / `[Next]`), and displaying target process bindings.
 
 ## The DenyList Explained
 
@@ -43,3 +46,13 @@ To configure the DenyList for a specific application, use the appropriate settin
 > **Important Note for Magisk Users**
 >
 > The **`Enforce DenyList`** option in Magisk enables Magisk's *own* DenyList implementation. This is separate from NyaZygisk's functionality, is not guaranteed to hide all mount-related traces, and may conflict with NyaZygisk's hiding mechanisms. It is strongly recommended to leave this option disabled and rely solely on NyaZygisk's configuration.
+
+## Credits & Acknowledgements
+
+* [NeoZygisk](https://github.com/JingMatrix/NeoZygisk): The original base project
+* [Magisk](https://github.com/topjohnwu/Magisk): The foundation of modern Android root & Zygisk
+* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): Reference implementation for standalone Zygisk Next API
+* [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): The original Zygisk Next module architecture
+* [Dobby](https://github.com/LSPosed/Dobby): In-process code hooking engine
+* [LSPlt](https://github.com/LSPosed/LSPlt): PLT hooking library for Android
+* [LZMA SDK](https://www.7-zip.org/sdk.html): ELF `.gnu_debugdata` decompression

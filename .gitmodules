@@ -1,3 +1,6 @@
 [submodule "loader/src/external/lsplt"]
 	path = loader/src/external/lsplt
 	url = https://github.com/JingMatrix/LSPlt
+[submodule "loader/src/external/dobby"]
+	path = loader/src/external/dobby
+	url = https://github.com/LSPosed/Dobby.git

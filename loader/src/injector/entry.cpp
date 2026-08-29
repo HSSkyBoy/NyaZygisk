@@ -3,6 +3,7 @@
 #include "daemon.hpp"
 #include "logging.hpp"
 #include "zygisk.hpp"
+#include "zn_loader.hpp"
 
 using namespace std;
 
@@ -19,6 +20,9 @@ void entry(void* addr, size_t size, const char* path) {
 
     hook_entry(addr, size);
     send_seccomp_event_if_needed();
+
+    // Load Zygisk Next modules matching current process
+    zn::loadAllModules();
 }
 
 /**

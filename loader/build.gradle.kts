@@ -31,7 +31,7 @@ val defaultCFlags = arrayOf(
     "-fno-rtti", "-fno-exceptions",
     "-fno-stack-protector", "-fomit-frame-pointer",
     "-Wno-builtin-macro-redefined", "-D__FILE__=__FILE_NAME__",
-    "-DWORK_DIRECTORY='\"${workDirectory}\"'"
+    "-DWORK_DIRECTORY=\"${workDirectory}\""
 )
 
 val releaseFlags = arrayOf(

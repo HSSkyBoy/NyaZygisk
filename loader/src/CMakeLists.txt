@@ -7,20 +7,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_definitions(-DZKSU_VERSION=\"${ZKSU_VERSION}\")
 
+add_subdirectory(external)
+
 aux_source_directory(common COMMON_SRC_LIST)
 add_library(common STATIC ${COMMON_SRC_LIST})
-target_include_directories(common PRIVATE include)
-target_link_libraries(common log)
+target_include_directories(common PRIVATE include external/lzma)
+target_link_libraries(common log lzma)
 
 aux_source_directory(injector INJECTOR_SRC_LIST)
 add_library(zygisk SHARED ${INJECTOR_SRC_LIST})
 target_compile_options(zygisk PRIVATE -Wno-invalid-offsetof -Wno-unused-private-field)
-target_include_directories(zygisk PRIVATE include)
-target_link_libraries(zygisk log common lsplt_static)
+target_include_directories(zygisk PRIVATE include external/dobby/include external/lzma)
+target_link_libraries(zygisk log common lsplt_static dobby lzma)
 
 aux_source_directory(ptracer PTRACER_SRC_LIST)
 add_executable(libzygisk_ptrace.so ${PTRACER_SRC_LIST})
 target_include_directories(libzygisk_ptrace.so PRIVATE include)
 target_link_libraries(libzygisk_ptrace.so log common)
-
-add_subdirectory(external)

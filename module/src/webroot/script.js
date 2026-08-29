@@ -226,9 +226,31 @@ function renderModules(modules) {
   }
 
   list.className = "module-list";
-  list.innerHTML = modules.map((name) => (
-    `<div class="list-item"><span>${escapeHtml(name)}</span><span class="chip">${t("active")}</span></div>`
-  )).join("");
+  list.innerHTML = modules.map((mod) => {
+    const isNext = mod.type === "next";
+    const typeLabel = isNext ? "Next" : "Zygisk";
+    const badgeClass = isNext ? "badge badge-next" : "badge badge-zygisk";
+    const targetInfo = (isNext && mod.target && mod.target !== "zygote")
+      ? `<span class="module-target">Target: ${escapeHtml(mod.target)}</span>`
+      : "";
+    const companionBadge = mod.companion
+      ? `<span class="badge badge-companion">Companion</span>`
+      : "";
+
+    return `
+      <div class="list-item">
+        <div class="module-info">
+          <span class="module-name">${escapeHtml(mod.name)}</span>
+          ${targetInfo}
+        </div>
+        <div class="module-badges">
+          <span class="${badgeClass}">${typeLabel}</span>
+          ${companionBadge}
+          <span class="chip">${t("active")}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function escapeHtml(text) {
@@ -248,10 +270,30 @@ function parseModules(data) {
   try {
     const parsed = JSON.parse(data.modules_list);
     if (Array.isArray(parsed)) {
-      return parsed.map((item) => String(item).trim()).filter(Boolean);
+      return parsed.map((item) => {
+        if (typeof item === "object" && item !== null) {
+          return {
+            name: String(item.name || "").trim(),
+            type: item.type === "next" ? "next" : "zygisk",
+            target: item.target ? String(item.target).trim() : "",
+            companion: Boolean(item.companion),
+          };
+        }
+        return {
+          name: String(item).trim(),
+          type: "zygisk",
+          target: "zygote",
+          companion: false,
+        };
+      }).filter((m) => m.name.length > 0);
     }
   } catch (_) {
-    return data.modules_list.split(",").map((item) => item.trim()).filter(Boolean);
+    return data.modules_list.split(",").map((item) => ({
+      name: item.trim(),
+      type: "zygisk",
+      target: "zygote",
+      companion: false,
+    })).filter((m) => m.name.length > 0);
   }
 
   return [];

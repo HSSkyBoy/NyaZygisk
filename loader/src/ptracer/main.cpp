@@ -18,7 +18,14 @@
 // Use string_view literals for efficient, allocation-free string comparisons.
 using namespace std::string_view_literals;
 
-const char *const kWorkDirectory = WORK_DIRECTORY;
+#define _STRINGIFY(x) #x
+#define STRINGIFY(x) _STRINGIFY(x)
+
+#ifdef WORK_DIRECTORY
+const char *const kWorkDirectory = STRINGIFY(WORK_DIRECTORY);
+#else
+const char *const kWorkDirectory = "/data/adb/neozygisk";
+#endif
 
 // The main entry point for the monitoring process.
 void init_monitor() {

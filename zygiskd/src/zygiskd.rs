@@ -235,13 +235,54 @@ fn send_startup_info(modules: &[Module]) -> Result<()> {
         | root_impl::RootImpl::KernelSU
         | root_impl::RootImpl::Magisk => {
             msg.extend_from_slice(&constants::DAEMON_SET_INFO.to_le_bytes());
-            let module_names: Vec<_> = modules.iter().map(|m| m.name.as_str()).collect();
+            
+            let mut module_entries = Vec::new();
+            for m in modules {
+                module_entries.push(serde_json::json!({
+                    "name": m.name,
+                    "type": "zygisk",
+                    "target": "zygote",
+                    "companion": false
+                }));
+            }
+
+            // Scan for Zygisk Next modules (zn_modules.txt)
+            if let Ok(dir) = fs::read_dir(constants::PATH_MODULES_DIR) {
+                for entry in dir.flatten() {
+                    let name = entry.file_name().into_string().unwrap_or_default();
+                    let zn_file = entry.path().join("zn_modules.txt");
+                    let disabled = entry.path().join("disable");
+                    let remove = entry.path().join("remove");
+                    if zn_file.exists() && !disabled.exists() && !remove.exists() {
+                        let mut targets = Vec::new();
+                        let mut has_companion = false;
+                        if let Ok(content) = fs::read_to_string(&zn_file) {
+                            for line in content.lines() {
+                                let parts: Vec<&str> = line.split_whitespace().collect();
+                                if parts.len() >= 2 {
+                                    targets.push(parts[0].to_string());
+                                    if parts.iter().any(|&p| p == "companion") {
+                                        has_companion = true;
+                                    }
+                                }
+                            }
+                        }
+                        module_entries.push(serde_json::json!({
+                            "name": name,
+                            "type": "next",
+                            "target": if targets.is_empty() { "unknown".to_string() } else { targets.join(", ") },
+                            "companion": has_companion
+                        }));
+                    }
+                }
+            }
+
             let modules_json =
-                serde_json::to_string(&module_names).unwrap_or_else(|_| "[]".to_string());
+                serde_json::to_string(&module_entries).unwrap_or_else(|_| "[]".to_string());
             format!(
                 "root_implementation={:?}\nmodules_count={}\nmodules_list={}\ndevice_kernel={}\ndevice_sdk={}\ndevice_abi={}",
                 root_impl::get(),
-                modules.len(),
+                module_entries.len(),
                 modules_json,
                 get_kernel_version(),
                 get_device_sdk(),
