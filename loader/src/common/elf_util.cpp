@@ -247,9 +247,6 @@ void ElfImage::ensureParsed() const {
         const ElfW(Shdr)* dshdrs =
             reinterpret_cast<const ElfW(Shdr)*>(debugdata_.data() + deh->e_shoff);
         const size_t dshnum = deh->e_shnum;
-        if (deh->e_shstrndx != SHN_UNDEF && deh->e_shstrndx < dshnum) {
-            const ElfW(Shdr)& dsstr = dshdrs[deh->e_shstrndx];
-        }
         for (size_t i = 0; i < dshnum; ++i) {
             const ElfW(Shdr)& sh = dshdrs[i];
             if (sh.sh_type != SHT_SYMTAB) continue;
