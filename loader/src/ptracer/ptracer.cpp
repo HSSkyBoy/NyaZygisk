@@ -325,6 +325,15 @@ static bool perform_injection(int pid) {
     std::string lib_path = zygiskd::GetTmpPath();
     lib_path += "/lib" LP_SELECT("", "64") "/libzygisk.so";
 
+    // Skip targets that already carry the Zygisk loader (e.g. a forked child
+    // of an injected process); injecting a second time would corrupt it.
+    for (const auto &info : MapInfo::Scan(std::to_string(pid))) {
+        if (info.path.find("libzygisk.so") != std::string::npos) {
+            LOGI("target %d already carries the Zygisk loader, skipping injection", pid);
+            return true;
+        }
+    }
+
     if (!inject_on_main(pid, lib_path.c_str())) {
         LOGE("failed to inject library into zygote (PID: %d)", pid);
         return false;

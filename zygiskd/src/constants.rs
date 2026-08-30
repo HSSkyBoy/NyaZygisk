@@ -60,6 +60,8 @@ pub enum DaemonSocketAction {
     ZygoteRestart,
     SystemServerStarted,
     GetSharedMemoryFd,
+    ReadZnModules,
+    SpawnZnCompanion,
 }
 
 bitflags! {

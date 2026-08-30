@@ -66,6 +66,8 @@ enum class SocketAction {
     ZygoteRestart,
     SystemServerStarted,
     GetSharedMemoryFd,
+    ReadZnModules,
+    SpawnZnCompanion,
 };
 
 enum class MountNamespace { Clean, Root };

@@ -80,6 +80,7 @@ mod mount;
 mod root_impl;
 mod utils;
 mod zygiskd;
+mod zn_companion;
 
 use crate::constants::ZKSU_VERSION;
 use log::error;
@@ -106,6 +107,17 @@ fn start() {
                 }
             } else {
                 error!("Companion: Missing file descriptor argument.");
+            }
+        }
+        Some("zn-companion") => {
+            if let Some(fd_str) = args.get(2) {
+                if let Ok(fd) = fd_str.parse() {
+                    zn_companion::entry(fd);
+                } else {
+                    error!("ZN Companion: Invalid file descriptor provided.");
+                }
+            } else {
+                error!("ZN Companion: Missing file descriptor argument.");
             }
         }
         Some("version") => {
