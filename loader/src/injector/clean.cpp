@@ -1,5 +1,6 @@
 #include <linux/mman.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 
 #include <array>
 #include <cstdio>
@@ -8,6 +9,13 @@
 #include <string>
 
 #include <lsplt.hpp>
+
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#endif
+#ifndef PR_SET_VMA_ANON_NAME
+#define PR_SET_VMA_ANON_NAME 0
+#endif
 
 #include "atexit.hpp"
 #include "fossil.hpp"
@@ -26,9 +34,9 @@ void clean_libc_trace() {
 }
 
 void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded_modules,
-                        bool unload_soinfo) {
+                        bool unload_soinfo, uintptr_t *out_base, size_t *out_size) {
     LOGV("cleaning linker trace for path %s", path);
-    Linker::dropSoPath(path, unload_soinfo);
+    Linker::dropSoPath(path, unload_soinfo, out_base, out_size);
 
     if (unload_soinfo) {
         Linker::resetCounters(loaded_modules, loaded_modules);
@@ -110,6 +118,7 @@ static void spoof_virtual_maps(std::span<const char *const> paths, bool clear_wr
             if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) != MAP_FAILED) {
                 LOGV("spoofed entry with anonymous memory %s [%p, %p]", map.path.c_str(), addr,
                      (void *) map.end);
+                prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, size, "dalvik-DEX data");
             } else {
                 LOGE("mremap failed for %s [%p, %p]", map.path.c_str(), addr, (void *) map.end);
                 munmap(copy, size);
