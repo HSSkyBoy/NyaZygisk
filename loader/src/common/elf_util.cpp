@@ -34,53 +34,82 @@
 #include <cstring>
 #include <unordered_set>
 
-#include "LzmaDec.h"
+extern "C" {
+#include "xz.h"
+}
+
+extern "C" void xz_crc32_init(void) {}
+
+extern "C" uint32_t xz_crc32(const uint8_t *buf, size_t size, uint32_t crc) {
+    crc = ~crc;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= buf[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xedb88320U & mask);
+        }
+    }
+    return ~crc;
+}
 
 #define ELF_LOGW(...) __android_log_print(ANDROID_LOG_WARN, "ZNNloader", __VA_ARGS__)
 
 namespace znn {
 
 // ---------------------------------------------------------------------------
-// LZMA ("alone" format) helper for .gnu_debugdata
+// XZ helper for .gnu_debugdata
 // ---------------------------------------------------------------------------
 
-static void* LzmaAlloc(ISzAllocPtr, size_t size) { return malloc(size); }
-static void LzmaFree(ISzAllocPtr, void* addr) { free(addr); }
-static const ISzAlloc g_lzma_alloc = {LzmaAlloc, LzmaFree};
+constexpr size_t kMaxGnuDebugDataSize = size_t{32} * 1024 * 1024;
 
-// Decode an LZMA1 "alone" stream:
-//   [props(1)][dict size(4, LE)][uncompressed size(8, LE)][data]
-static bool lzmaAloneDecompress(const uint8_t* in, size_t in_size, std::vector<uint8_t>& out) {
-    if (in_size < 13) return false;
+static bool decompress_xz(const uint8_t *data, size_t size, std::vector<uint8_t> &out) {
+    static constexpr uint8_t kXzMagic[] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00};
+    if (data == nullptr || size < sizeof(kXzMagic) || memcmp(data, kXzMagic, sizeof(kXzMagic)) != 0) {
+        return false;
+    }
 
-    // props: 1 byte (lc/lp/pb) + 4 bytes dictionary size.
-    const Byte* props = in;
+    xz_dec *dec = xz_dec_init(XZ_DYNALLOC, kMaxGnuDebugDataSize);
+    if (dec == nullptr) return false;
 
-    uint64_t out_size = 0;
-    for (int i = 0; i < 8; ++i) out_size |= static_cast<uint64_t>(in[5 + i]) << (8 * i);
+    out.clear();
+    out.resize(size_t{64} * 1024);
+    xz_buf b{};
+    b.in = data;
+    b.in_size = size;
+    b.out = out.data();
+    b.out_size = out.size();
 
-    if (out_size == 0 || out_size == UINT64_MAX) return false;
+    bool ok = false;
+    for (;;) {
+        xz_ret ret = xz_dec_run(dec, &b);
+        if (ret == XZ_STREAM_END) {
+            out.resize(b.out_pos);
+            ok = true;
+            break;
+        }
+        if (ret == XZ_UNSUPPORTED_CHECK) continue;
+        if (ret != XZ_OK) break;
+        if (b.out_pos == out.size()) {
+            if (out.size() >= kMaxGnuDebugDataSize) break;
+            const size_t next = std::min(out.size() * 2, kMaxGnuDebugDataSize);
+            out.resize(next);
+            b.out = out.data();
+            b.out_size = out.size();
+            continue;
+        }
+        if (b.in_pos == b.in_size) break;
+    }
 
-    const uint8_t* data = in + 13;
-    size_t data_size = in_size - 13;
-
-    out.resize(static_cast<size_t>(out_size));
-    SizeT dest_len = static_cast<SizeT>(out_size);
-    SizeT src_len = static_cast<SizeT>(data_size);
-    ELzmaStatus status;
-
-    SRes res = LzmaDecode(out.data(), &dest_len, data, &src_len, props, 5, LZMA_FINISH_END, &status,
-                          &g_lzma_alloc);
-    if (res != SZ_OK) return false;
-
-    out.resize(dest_len);
-    return true;
+    xz_dec_end(dec);
+    if (!ok) out.clear();
+    return ok;
 }
 
 static bool isElf(const uint8_t* p, size_t size) {
     return size >= SELFMAG + 1 && p[EI_MAG0] == ELFMAG0 && p[EI_MAG1] == ELFMAG1 &&
            p[EI_MAG2] == ELFMAG2 && p[EI_MAG3] == ELFMAG3;
 }
+
 
 // ---------------------------------------------------------------------------
 // ElfImage
@@ -193,20 +222,15 @@ void ElfImage::parseSymbols(const ElfW(Shdr)* str_sh, const char* strtab,
 }
 
 bool ElfImage::parseGnuDebugData(const uint8_t* data, size_t size) const {
-    // Two common layouts: Android prepends a 4-byte CRC32 before the LZMA
-    // stream, the GNU toolchain emits the raw LZMA stream directly. Try both.
-    for (size_t off : {static_cast<size_t>(4), static_cast<size_t>(0)}) {
-        if (size <= off + 13) continue;
-        std::vector<uint8_t> out;
-        if (!lzmaAloneDecompress(data + off, size - off, out)) continue;
-        if (!isElf(out.data(), out.size())) continue;
+    std::vector<uint8_t> out;
+    if (!decompress_xz(data, size, out)) return false;
+    if (!isElf(out.data(), out.size())) return false;
 
-        debugdata_ = std::move(out);
-        debugdata_ehdr_ = reinterpret_cast<const ElfW(Ehdr)*>(debugdata_.data());
-        return true;
-    }
-    return false;
+    debugdata_ = std::move(out);
+    debugdata_ehdr_ = reinterpret_cast<const ElfW(Ehdr)*>(debugdata_.data());
+    return true;
 }
+
 
 void ElfImage::ensureParsed() const {
     if (parsed_) return;
