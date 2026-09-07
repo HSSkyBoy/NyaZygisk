@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "logging.hpp"
+#include "zygisk.hpp"
 
 namespace Linker {
 
@@ -217,9 +218,11 @@ bool dropSoPath(const char *target_path, bool unload, uintptr_t *out_base, size_
         if (out_size != nullptr && *out_size == 0) *out_size = size;
         target->setSize(0);
         if (unload) {
+            auto cfi_backup = backup_cfi_shadow(target->getBase(), size);
             target->setConstructorCalled(false);
             SoInfoWrapper::soinfo_unload(target);
             target->setConstructorCalled(true);
+            restore_cfi_shadow(cfi_backup);
         } else {
             SoInfoWrapper::soinfo_free(target);
             target->setSize(size);

@@ -3,7 +3,9 @@
 #include <jni.h>
 #include <sys/types.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 struct mount_info {
     unsigned int id;
@@ -30,7 +32,18 @@ void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded
 
 bool is_anonymous_memory_enabled();
 
-void spoof_virtual_maps(const char *path, bool clear_write_permission);
+struct SavedCfiShadow {
+    uintptr_t dst_addr = 0;
+    std::vector<uint8_t> shadow_data;
+};
+
+SavedCfiShadow backup_cfi_shadow(uintptr_t base, size_t size);
+bool restore_cfi_shadow(const SavedCfiShadow &saved);
+
+int spoof_virtual_maps(const char *path_substr, bool private_only = true);
+int spoof_fd_maps(int fd, bool private_only = true);
+int spoof_loaded_object_maps(uintptr_t address, bool private_only = true);
+
 void spoof_module_maps(bool clear_write_permission);
 
 void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor);
