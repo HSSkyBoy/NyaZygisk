@@ -183,4 +183,6 @@ private:
     std::string pre_section_;
     std::string post_section_;
     std::string last_written_status_;
+    long initial_version_code_ = -1;
 };
+

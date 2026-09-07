@@ -136,8 +136,36 @@ void AppMonitor::update_status() {
     if (!atomic_write_file(prop_path_, installed_status)) {
         LOGE("Failed to write runtime module.prop: %s", prop_path_.c_str());
     }
-    if (!atomic_write_file("./module.prop", runtime_status)) {
-        LOGE("Failed to write installed module.prop: ./module.prop");
+
+    bool should_write_installed_prop = true;
+    if (initial_version_code_ >= 0) {
+        auto cur_file = xopen_file("./module.prop", "r");
+        if (cur_file != nullptr) {
+            file_readline(false, cur_file.get(), [&](std::string_view line_view) -> bool {
+                if (line_view.starts_with("versionCode=")) {
+                    std::string code_str(line_view.substr(12));
+                    while (!code_str.empty() && (code_str.back() == '\r' || code_str.back() == '\n' ||
+                                                 code_str.back() == ' ' || code_str.back() == '\t')) {
+                        code_str.pop_back();
+                    }
+                    char *end_ptr = nullptr;
+                    long disk_code = strtol(code_str.c_str(), &end_ptr, 10);
+                    if (end_ptr != code_str.c_str() && disk_code > initial_version_code_) {
+                        LOGI("module.prop updated by external installer (disk: %ld > memory: %ld); skip overwriting",
+                             disk_code, initial_version_code_);
+                        should_write_installed_prop = false;
+                        return false;
+                    }
+                }
+                return true;
+            });
+        }
+    }
+
+    if (should_write_installed_prop) {
+        if (!atomic_write_file("./module.prop", runtime_status)) {
+            LOGE("Failed to write installed module.prop: ./module.prop");
+        }
     }
 }
 
@@ -156,6 +184,7 @@ bool AppMonitor::prepare_environment() {
     }
     pre_section_ = "";
     post_section_ = "";
+    initial_version_code_ = -1;
     bool post = false;
     auto is_generated_key = [](std::string_view line) {
         return line.starts_with("monitor_status=") || line.starts_with("monitor_stop_reason=") ||
@@ -168,6 +197,14 @@ bool AppMonitor::prepare_environment() {
         }
         if (line.find_first_not_of(" \t") == std::string::npos) return true;
         if (is_generated_key(line)) return true;
+        if (line.starts_with("versionCode=")) {
+            std::string code_str = line.substr(12);
+            char *end_ptr = nullptr;
+            long val = strtol(code_str.c_str(), &end_ptr, 10);
+            if (end_ptr != code_str.c_str()) {
+                initial_version_code_ = val;
+            }
+        }
         if (line.starts_with("description=")) {
             if (post) return true;
             post = true;
@@ -207,6 +244,7 @@ bool AppMonitor::prepare_environment() {
     update_status();
     return true;
 }
+
 
 void AppMonitor::run() {
     socket_handler_.Init();

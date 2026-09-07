@@ -104,6 +104,20 @@ if [ "$KSU" ]; then
   fi
 fi
 
+# Stop any running old monitor/tracer to prevent it from overwriting new module.prop during update
+if [ "$BOOTMODE" ]; then
+  for tracer_bin in \
+    /data/adb/modules/zygisksu/bin/zygisk-ptrace64 \
+    /data/adb/modules/zygisksu/bin/zygisk-ptrace32 \
+    "$MODPATH/bin/zygisk-ptrace64" \
+    "$MODPATH/bin/zygisk-ptrace32"; do
+    if [ -f "$tracer_bin" ]; then
+      "$tracer_bin" ctl exit >/dev/null 2>&1
+    fi
+  done
+  killall -9 zygisk-ptrace64 zygisk-ptrace32 >/dev/null 2>&1
+fi
+
 ui_print "- Extracting module files"
 extract "$ZIPFILE" 'module.prop'               "$MODPATH"
 extract "$ZIPFILE" 'spoof.prop'                "$MODPATH"
