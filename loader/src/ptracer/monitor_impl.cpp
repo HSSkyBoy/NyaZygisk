@@ -677,18 +677,45 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
             break;
         }
 
-        if (program != monitor_.get_abi_manager().program_path_) {
+        std::string clean_prog = program;
+        if (clean_prog.ends_with(" (deleted)")) {
+            clean_prog.resize(clean_prog.size() - 10);
+        }
+
+        bool is_zygote = (clean_prog == monitor_.get_abi_manager().program_path_);
+#if defined(__LP64__)
+        bool is_hyos_spawner = (clean_prog == "/system_ext/bin/hyos_spawner");
+#else
+        bool is_hyos_spawner = false;
+#endif
+
+        if (!is_zygote && !is_hyos_spawner) {
             break;  // Irrelevant program, exit block and return false.
         }
 
-        const char *tracer = monitor_.get_abi_manager().check_and_prepare_injection();
-        if (tracer == nullptr) {
-            LOGE("failed to prepare injector for target %d", pid);
-            break;
+        const char *tracer;
+        if (is_hyos_spawner) {
+            // For hyos_spawner, only retrieve the tracer path — do NOT run
+            // crash-loop detection or daemon creation, which are Zygote-specific.
+            // Reusing check_and_prepare_injection() would corrupt the Zygote
+            // crash-loop counter and reset zygote_injected to false on every
+            // hyos_spawner exec.
+            tracer = monitor_.get_abi_manager().tracer_path();
+            if (!tracer) {
+                LOGE("failed to get tracer path for hyos_spawner %d", pid);
+                break;
+            }
+        } else {
+            tracer = monitor_.get_abi_manager().check_and_prepare_injection();
+            if (tracer == nullptr) {
+                LOGE("failed to prepare injector for zygote %d", pid);
+                break;
+            }
         }
 
-        // --- Zygote Handover Sequence ---
-        LOGV("intercepted target zygote %d, halting for injector hand-off", pid);
+        // --- Target Handover Sequence ---
+        LOGI("intercepted %s %d, halting for injector hand-off",
+             is_hyos_spawner ? "hyos_spawner" : "zygote", pid);
 
         // Force the process into a standard SIGSTOP state.
         kill(pid, SIGSTOP);
@@ -706,8 +733,13 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
             // Fork and execute the external injector daemon.
             auto p = fork_dont_care();
             if (p == 0) {
-                execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(), "--restart",
-                      nullptr);
+                if (is_hyos_spawner) {
+                    execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(),
+                          nullptr);
+                } else {
+                    execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(), "--restart",
+                          nullptr);
+                }
                 PLOGE("execute injector daemon");
                 kill(pid, SIGKILL);
                 _exit(1);

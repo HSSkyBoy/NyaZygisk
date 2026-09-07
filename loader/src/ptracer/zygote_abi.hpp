@@ -28,6 +28,12 @@ public:
     bool handle_daemon_exit_if_match(int pid, int process_status);
     const char* check_and_prepare_injection();
 
+    // Returns only the tracer path, with NO side effects (no crash-loop counting,
+    // no daemon creation, no status mutation). Intended for non-Zygote injection
+    // targets such as hyos_spawner, which have independent lifecycle and should
+    // never pollute the Zygote crash-loop counter or zygote_injected flag.
+    const char* tracer_path() const { return tracer_path_; }
+
     // Public methods for state modification
     const Status& get_status() const;
     void notify_injected();

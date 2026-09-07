@@ -4,6 +4,7 @@
 #include "logging.hpp"
 #include "zygisk.hpp"
 #include "zn_loader.hpp"
+#include "zn_api.hpp"
 
 using namespace std;
 
@@ -12,6 +13,13 @@ void entry(void* addr, size_t size, const char* path) {
     LOGI("zygisk library injected, version %s", ZKSU_VERSION);
 
     zygiskd::Init(path);
+
+    if (zn::isHyosSpawner()) {
+        LOGI("Running inside hyos_spawner, initializing HyperOS Runtime");
+        zn::initHyosRuntime();
+        zn::loadAllModules();
+        return;
+    }
 
     if (!zygiskd::PingHeartbeat()) {
         LOGE("zygisk daemon is not running");
