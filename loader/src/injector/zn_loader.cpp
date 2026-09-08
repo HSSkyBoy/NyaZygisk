@@ -27,7 +27,15 @@ std::string getProcessPath() {
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n <= 0) return {};
     buf[n] = '\0';
-    return buf;
+    std::string p(buf, static_cast<size_t>(n));
+    // Strip the " (deleted)" suffix that the kernel appends when the
+    // on-disk binary has been replaced (e.g. during system updates).
+    constexpr std::string_view kDeleted = " (deleted)";
+    if (p.size() > kDeleted.size() &&
+        p.compare(p.size() - kDeleted.size(), kDeleted.size(), kDeleted) == 0) {
+        p.resize(p.size() - kDeleted.size());
+    }
+    return p;
 }
 
 std::string getProcessName() {

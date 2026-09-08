@@ -125,11 +125,11 @@ int api_pltHook(void* base, const char* symbol, void* hook, void** original) {
         LOGE("ZN pltHook %s: CommitHook failed", symbol);
         return ZN_FAILED;
     }
-    if (original) *original = backup;
     if (!backup) {
         LOGE("ZN pltHook %s: symbol not found in PLT (backup is null)", symbol);
         return ZN_FAILED;
     }
+    if (original) *original = backup;
     return ZN_SUCCESS;
 }
 
