@@ -266,24 +266,47 @@ int g_hyos_module_count = 0;
 bool g_hyos_in_child = false;
 bool g_hyos_fired = false;
 
+typedef pid_t (*HyosForkFn)();
 typedef int (*HyosSetcontextFn)(uid_t uid, int is_system_server, const char* se_info,
                                 const char* pkg_name);
 typedef int (*HyosSetnameFn)(pthread_t thread, const char* name);
+HyosForkFn g_orig_fork = nullptr;
 HyosSetcontextFn g_orig_setcontext = nullptr;
 HyosSetnameFn g_orig_setname = nullptr;
 bool g_hyos_warned = false;
+
+dev_t g_spawner_dev = 0;
+ino_t g_spawner_inode = 0;
 
 char g_cap_process_name[256] = {};
 bool g_cap_has_process_name = false;
 
 bool readProcCmdline(char* out, size_t max_len) {
-    int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    if (!out || max_len == 0) return false;
+    int fd;
+    do {
+        fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    } while (fd < 0 && errno == EINTR);
     if (fd < 0) return false;
-    ssize_t n = read(fd, out, max_len - 1);
+
+    size_t length = 0;
+    bool complete = false;
+    while (length + 1 < max_len) {
+        char val = '\0';
+        ssize_t r;
+        do {
+            r = read(fd, &val, sizeof(val));
+        } while (r < 0 && errno == EINTR);
+        if (r != sizeof(val)) break;
+        if (val == '\0') {
+            complete = (length != 0);
+            break;
+        }
+        out[length++] = val;
+    }
     close(fd);
-    if (n <= 0) return false;
-    out[n] = '\0';
-    return out[0] != '\0';
+    out[length] = '\0';
+    return complete;
 }
 
 void hyosDeliverAppSpecialized(const char* pkg_name, const char* se_info) {
@@ -346,6 +369,14 @@ void hyosAtForkChild() {
     g_cap_process_name[0] = '\0';
 }
 
+pid_t hyosForkHook() {
+    pid_t res = g_orig_fork ? g_orig_fork() : -1;
+    if (res == 0) {
+        hyosAtForkChild();
+    }
+    return res;
+}
+
 void hyosInstallHooks();
 
 void hyosAtForkPrepare() {
@@ -355,6 +386,48 @@ void hyosAtForkPrepare() {
 }
 
 void hyosInstallHooks() {
+    // 1. Locate hyos_spawner main executable dev & inode for PLT hooking (YukiSU style)
+    if (g_spawner_inode == 0) {
+        auto maps = parseMaps("self");
+        for (const auto& m : maps) {
+            if (m.offset == 0 && m.inode != 0 &&
+                (m.path == "/system_ext/bin/hyos_spawner" ||
+                 m.path.ends_with("/hyos_spawner") ||
+                 m.path.find("hyos_spawner") != std::string::npos)) {
+                g_spawner_dev = m.dev;
+                g_spawner_inode = m.inode;
+                LOGI("HYOS: identified spawner main dev=%lu inode=%lu at %p",
+                     (unsigned long)m.dev, (unsigned long)m.inode, reinterpret_cast<void*>(m.start));
+                break;
+            }
+        }
+    }
+
+    // Try PLT hook on hyos_spawner first
+    if (g_spawner_inode != 0) {
+        if (!g_orig_fork) {
+            void* backup = nullptr;
+            if (lsplt::RegisterHook(g_spawner_dev, g_spawner_inode, "fork",
+                                    reinterpret_cast<void*>(hyosForkHook), &backup)) {
+                if (lsplt::CommitHook() && backup) {
+                    g_orig_fork = reinterpret_cast<HyosForkFn>(backup);
+                    LOGI("HYOS: PLT hooked fork in hyos_spawner");
+                }
+            }
+        }
+        if (!g_orig_setcontext) {
+            void* backup = nullptr;
+            if (lsplt::RegisterHook(g_spawner_dev, g_spawner_inode, "selinux_android_setcontext",
+                                    reinterpret_cast<void*>(hyosSetcontextHook), &backup)) {
+                if (lsplt::CommitHook() && backup) {
+                    g_orig_setcontext = reinterpret_cast<HyosSetcontextFn>(backup);
+                    LOGI("HYOS: PLT hooked selinux_android_setcontext in hyos_spawner");
+                }
+            }
+        }
+    }
+
+    // 2. Fallback / supplementary Inline Hook (ZNN style)
     if (!g_orig_setcontext) {
         void* fn = dlsym(RTLD_DEFAULT, "selinux_android_setcontext");
         if (!fn) {
@@ -363,7 +436,7 @@ void hyosInstallHooks() {
         }
         if (fn && inlineHookRaw(fn, reinterpret_cast<void*>(hyosSetcontextHook),
                                 reinterpret_cast<void**>(&g_orig_setcontext))) {
-            LOGI("HYOS: hooked selinux_android_setcontext at %p", fn);
+            LOGI("HYOS: inline hooked selinux_android_setcontext at %p", fn);
         }
     }
     if (!g_orig_setname) {
@@ -374,7 +447,7 @@ void hyosInstallHooks() {
         }
         if (fn && inlineHookRaw(fn, reinterpret_cast<void*>(hyosSetnameHook),
                                 reinterpret_cast<void**>(&g_orig_setname))) {
-            LOGI("HYOS: hooked pthread_setname_np at %p", fn);
+            LOGI("HYOS: inline hooked pthread_setname_np at %p", fn);
         }
     }
     if (!g_orig_setcontext && !g_hyos_warned) {

@@ -1,6 +1,7 @@
 #include "main.hpp"
 
 #include <err.h>
+#include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -154,17 +155,23 @@ static int handle_trace(int argc, char **argv) {
     pid_t pid = static_cast<pid_t>(pid_val);
     printf("preparing to trace PID: %d\n", pid);
 
-    // Handle optional --restart flag.
-    if (argc >= 4 && argv[3] == "--restart"sv) {
+    bool is_restart_target = (argc >= 4 && argv[3] == "--restart"sv);
+    if (is_restart_target) {
         printf("zygote restart requested...\n");
         zygiskd::ZygoteRestart();
     }
 
     if (!trace_zygote(pid)) {
         fprintf(stderr,
-                "error: failed to trace zygote, killing process %d to prevent system instability\n",
-                pid);
-        kill(pid, SIGKILL);
+                "error: failed to trace target %d%s\n",
+                pid, is_restart_target ? ", killing zygote to prevent system instability" : "");
+        if (is_restart_target) {
+            kill(pid, SIGKILL);
+        } else {
+            // Resume the process so system daemons like hyos_spawner do not hang
+            ptrace(PTRACE_DETACH, pid, 0, SIGCONT);
+            kill(pid, SIGCONT);
+        }
         return EXIT_FAILURE;
     }
 

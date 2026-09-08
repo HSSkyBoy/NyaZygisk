@@ -402,8 +402,12 @@ static bool trace_with_seize(int pid) {
     // Wait for the initial Seize stop
     if (!wait_for_process(pid, &status)) return false;
 
-    // SEIZE usually stops with SIGSTOP + PTRACE_EVENT_STOP
-    if (STOPPED_WITH(SIGSTOP, PTRACE_EVENT_STOP)) {
+    // SEIZE stops with SIGSTOP: either with PTRACE_EVENT_STOP or plain SIGSTOP (event 0)
+    // if the target process was already in a stopped state from the monitor hand-off.
+    bool initial_stop_ok = WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP &&
+                           ((status >> 16) == PTRACE_EVENT_STOP || (status >> 16) == 0);
+
+    if (initial_stop_ok) {
         // 1. Inject Payload
         if (!perform_injection(pid)) {
             BAIL_AND_DETACH
@@ -440,8 +444,12 @@ static bool trace_with_seize(int pid) {
                 LOGE("unexpected state after SIGTRAP: %s", parse_status(status).c_str());
                 BAIL_AND_DETACH
             }
+        } else if (STOPPED_WITH(SIGCONT, 0)) {
+            // Direct SIGCONT delivery without intermediate SIGTRAP
+            LOGV("received direct SIGCONT");
+            return detach_with_gki_workaround(pid, SIGCONT);
         } else {
-            LOGE("expected SIGTRAP after CONT, got: %s", parse_status(status).c_str());
+            LOGE("expected SIGTRAP/SIGCONT after CONT, got: %s", parse_status(status).c_str());
             BAIL_AND_DETACH
         }
     } else {
