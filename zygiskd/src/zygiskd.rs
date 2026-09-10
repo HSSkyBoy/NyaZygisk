@@ -25,7 +25,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::{
     os::unix::net::{UnixListener, UnixStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{atomic::{fence, Ordering}, Arc, Mutex, OnceLock},
     thread,
@@ -171,6 +171,8 @@ fn handle_threaded_action(
         }
         DaemonSocketAction::GetModuleDir => handle_get_module_dir(&mut stream, context),
         DaemonSocketAction::GetSharedMemoryFd => handle_get_shared_memory_fd(&mut stream),
+        DaemonSocketAction::ReadZnModules => handle_read_zn_modules(&mut stream),
+        DaemonSocketAction::SpawnZnCompanion => handle_spawn_zn_companion(&mut stream),
         // Other cases are handled synchronously and won't reach here.
         _ => unreachable!(),
     }
@@ -575,6 +577,199 @@ fn handle_get_shared_memory_fd(stream: &mut UnixStream) -> Result<()> {
         stream.send_fd(shm.fd.as_raw_fd())?;
     } else {
         stream.write_u8(0)?;
+    }
+    Ok(())
+}
+
+// --- Zygisk Next (ZN) module support ---
+//
+// ZN modules are loaded by the injected loader inside target processes. Those
+// targets cannot always read /data/adb/modules (DAC permission errors on
+// non-root targets) and any companion process forked from them inherits the
+// target's restricted SELinux domain. Both problems are solved by serving ZN
+// modules and spawning ZN companions from this privileged daemon instead.
+
+/// Parses a `zn_modules.txt` file, returning `(is_name, target, companion, lib)`
+/// entries mirroring the loader-side parser.
+fn parse_zn_modules_file(path: &Path) -> Vec<(bool, String, bool, String)> {
+    let mut out = Vec::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return out;
+    };
+    for line in content.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 2 {
+            continue;
+        }
+        let (is_name, target) = if let Some(t) = toks[0].strip_prefix("path=") {
+            (false, t.to_string())
+        } else if let Some(t) = toks[0].strip_prefix("name=") {
+            (true, t.to_string())
+        } else {
+            continue;
+        };
+        // Any token between the target and the library may request a companion.
+        let companion = toks[1..toks.len() - 1].iter().any(|t| *t == "companion");
+        let lib = toks[toks.len() - 1].to_string();
+        out.push((is_name, target, companion, lib));
+    }
+    out
+}
+
+/// Mirrors the loader's `matchEntry`: does this zn_modules.txt entry apply to
+/// the given process?
+fn zn_entry_matches(is_name: bool, target: &str, process_name: &str, process_path: &str) -> bool {
+    if is_name {
+        // Special case: "zygote" matches zygote, zygote64, app_process,
+        // app_process64, app_process32.
+        if target == "zygote" || target == "zygote64" || target == "zygote32" {
+            if process_name.contains("zygote") || process_name.contains("app_process") {
+                return true;
+            }
+        }
+        process_name == target
+    } else {
+        process_path == target
+    }
+}
+
+/// Resolves a module lib path (absolute or relative to the module dir) and
+/// verifies it stays strictly inside the module directory.
+fn resolve_zn_lib(moddir: &Path, lib: &str) -> Option<String> {
+    let candidate = if lib.starts_with('/') {
+        PathBuf::from(lib)
+    } else {
+        moddir.join(lib)
+    };
+    let real = fs::canonicalize(&candidate).ok()?;
+    let mod_real = fs::canonicalize(moddir).ok()?;
+    if real == mod_real || !real.starts_with(&mod_real) {
+        return None;
+    }
+    Some(real.to_string_lossy().into_owned())
+}
+
+/// Lists the ZN modules matching a process and hands each module library to
+/// the caller as a memfd, so the injected loader never has to read
+/// /data/adb/modules itself.
+fn handle_read_zn_modules(stream: &mut UnixStream) -> Result<()> {
+    let process_name = stream.read_string().context("read process name")?;
+    let process_path = stream.read_string().context("read process path")?;
+
+    let mut records: Vec<(String, bool, OwnedFd)> = Vec::new();
+    if let Ok(dir) = fs::read_dir(constants::PATH_MODULES_DIR) {
+        for entry in dir.flatten() {
+            let moddir = entry.path();
+            let zn_file = moddir.join("zn_modules.txt");
+            if !zn_file.exists()
+                || moddir.join("disable").exists()
+                || moddir.join("remove").exists()
+            {
+                continue;
+            }
+            for (is_name, target, companion, lib) in parse_zn_modules_file(&zn_file) {
+                if !zn_entry_matches(is_name, &target, &process_name, &process_path) {
+                    continue;
+                }
+                let Some(real) = resolve_zn_lib(&moddir, &lib) else {
+                    warn!(
+                        "ZN module lib `{}` cannot be resolved inside {}",
+                        lib,
+                        moddir.display()
+                    );
+                    continue;
+                };
+                match create_library_fd(Path::new(&real)) {
+                    Ok(fd) => records.push((real, companion, fd)),
+                    Err(e) => warn!("Failed to create memfd for `{}`: {}", real, e),
+                }
+            }
+        }
+    }
+
+    let count = records.len();
+    stream.write_usize(count)?;
+    for (lib_path, companion, fd) in records {
+        stream.write_string(&lib_path)?;
+        stream.write_u8(if companion { 1 } else { 0 })?;
+        stream.send_fd(fd.as_raw_fd())?;
+    }
+    info!("Served {} ZN module(s) for {}", count, process_name);
+    Ok(())
+}
+
+/// Spawns a dedicated companion process for a ZN module library.
+///
+/// The companion is forked from this privileged daemon (and re-executes this
+/// binary in `zn-companion` mode), so it keeps a privileged SELinux domain
+/// instead of inheriting the target's restricted one. The control socket is
+/// handed back to the caller; the companion and the target then talk directly.
+fn handle_spawn_zn_companion(stream: &mut UnixStream) -> Result<()> {
+    let lib_path = stream.read_string().context("read lib path")?;
+
+    let lib_fd = match create_library_fd(Path::new(&lib_path)) {
+        Ok(fd) => fd,
+        Err(e) => {
+            warn!("Failed to create memfd for `{}`: {}", lib_path, e);
+            stream.write_u8(0)?;
+            return Ok(());
+        }
+    };
+
+    let (mut daemon_sock, companion_sock) = UnixStream::pair()?;
+
+    // FIXME: A more robust way to get the current executable path is desirable.
+    let self_exe = std::env::args().next().unwrap();
+
+    // The fork/exec logic is handled directly here.
+    // # Safety
+    // This is highly unsafe because it uses `fork()` and `exec()`. The child
+    // process must not call any non-async-signal-safe functions before `exec()`.
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            bail!(Error::last_os_error());
+        }
+
+        if pid == 0 {
+            // --- Child Process ---
+            drop(daemon_sock); // Child doesn't need the daemon's end of the socket.
+
+            // The companion socket FD must be passed to the new process,
+            // so we must remove the `FD_CLOEXEC` flag.
+            fcntl_setfd(companion_sock.as_fd(), FdFlags::empty())
+                .expect("Failed to clear CLOEXEC on companion socket");
+
+            let fd_str = format!("{}", companion_sock.as_raw_fd());
+            let err = Command::new(&self_exe)
+                .arg0("znn-companion")
+                .arg("zn-companion")
+                .arg(fd_str)
+                .exec();
+
+            // exec replaces the current process; it does not return on success.
+            bail!("exec failed: {}", err);
+        }
+
+        // --- Parent Process ---
+        drop(companion_sock); // Parent doesn't need the companion's end of the socket.
+
+        daemon_sock.write_string(&lib_path)?;
+        daemon_sock.send_fd(lib_fd.as_raw_fd())?;
+
+        // Wait for the companion's response to know if it loaded the module.
+        match daemon_sock.read_u8()? {
+            0 => {
+                warn!("ZN companion for `{}` failed to start", lib_path);
+                stream.write_u8(0)?;
+            }
+            1 => {
+                info!("ZN companion spawned for {} (pid {})", lib_path, pid);
+                stream.write_u8(1)?;
+                stream.send_fd(daemon_sock.as_raw_fd())?;
+            }
+            _ => bail!("Invalid response from ZN companion setup"),
+        }
     }
     Ok(())
 }

@@ -17,3 +17,9 @@ allow zygote magisk memfd_file {getattr read write map execute}
 allow zygote su memfd_file {getattr read write map execute}
 allow zygote proc file *
 allow zygote nsfs file *
+
+# The daemon (zygiskd) hands module libraries to the injected loader as
+# memfds. Their SELinux label depends on the daemon's domain ("magisk_memfd",
+# "su_memfd", "ksud_memfd", ...), so cover every label: dlopen needs `execute`
+# on the memfd no matter which root implementation created it.
+allow * * file execute
