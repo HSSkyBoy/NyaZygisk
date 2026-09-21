@@ -27,9 +27,9 @@ val workDirectory by extra("/data/adb/neozygisk")
 val updateJson by extra("https://www.nkbe.top/nyazygisk/zygisk.json")
 
 val androidMinSdkVersion by extra(25)
-val androidTargetSdkVersion by extra(36)
-val androidCompileSdkVersion by extra(36)
-val androidBuildToolsVersion by extra("36.1.0")
+val androidTargetSdkVersion by extra(37)
+val androidCompileSdkVersion by extra(37)
+val androidBuildToolsVersion by extra("37.0.0")
 // Don't update NDK unless after careful and detailed tests,
 // as explained in https://github.com/JingMatrix/NeoZygisk/pull/36
 val androidCompileNdkVersion by extra("27.2.12479018")

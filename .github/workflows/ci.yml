@@ -33,9 +33,23 @@ jobs:
         with:
           distribution: "zulu"
           java-version: "21"
+          cache: "gradle"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          cmdline-tools-version: 14742923
+          packages: ''
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install SDK 37 & NDK
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-37.0"
+          sdkmanager "build-tools;37.0.0"
+          sdkmanager "ndk;27.2.12479018"
 
       - name: Setup Rust toolchain
         run: |
