@@ -7,7 +7,9 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 
 #include "daemon.hpp"
 #include "files.hpp"
@@ -246,9 +248,56 @@ bool AppMonitor::prepare_environment() {
 }
 
 
+namespace {
+
+void respawn_preexisting_zygote(const std::string &target_exe) {
+    DIR *proc = opendir("/proc");
+    if (!proc) {
+        return;
+    }
+
+    struct dirent *dp;
+    while ((dp = readdir(proc)) != nullptr) {
+        if (dp->d_name[0] < '0' || dp->d_name[0] > '9') {
+            continue;
+        }
+
+        char *endptr = nullptr;
+        long pid = strtol(dp->d_name, &endptr, 10);
+        if (*endptr != '\0' || pid <= 1) {
+            continue;
+        }
+
+        char link_path[64];
+        snprintf(link_path, sizeof(link_path), "/proc/%ld/exe", pid);
+
+        char exe_buf[PATH_MAX];
+        ssize_t n = readlink(link_path, exe_buf, sizeof(exe_buf) - 1);
+        if (n <= 0) {
+            continue;
+        }
+        exe_buf[n] = '\0';
+
+        std::string_view exe_view(exe_buf, n);
+        if (exe_view.ends_with(" (deleted)")) {
+            exe_view.remove_suffix(10);
+        }
+
+        if (exe_view == target_exe) {
+            LOGI("Found running zygote (PID %ld) prior to monitor attachment, terminating for late-load respawn", pid);
+            kill(static_cast<pid_t>(pid), SIGKILL);
+            break;
+        }
+    }
+    closedir(proc);
+}
+
+}  // namespace
+
 void AppMonitor::run() {
     socket_handler_.Init();
     ptrace_handler_.Init();
+    respawn_preexisting_zygote(zygote_.program_path_);
     event_loop_.Init();
     event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET);
     event_loop_.RegisterHandler(ptrace_handler_, EPOLLIN | EPOLLET);
