@@ -344,4 +344,5 @@ struct HookContext {
 
 private:
     void register_hook(dev_t dev, ino_t inode, const char *symbol, void *new_func, void **old_func);
+    void register_hook_optional(dev_t dev, ino_t inode, const char *symbol, void *new_func, void **old_func);
 };

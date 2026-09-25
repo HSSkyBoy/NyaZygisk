@@ -10,6 +10,7 @@
 #include <unwind.h>
 #include <fcntl.h>
 #include <atomic>
+#include <cstdarg>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "daemon.hpp"
 #include "logging.hpp"
 #include "module.hpp"
+#include "tracer_pid.hpp"
 #include "zygisk.hpp"
 
 using namespace std;
@@ -317,6 +319,63 @@ inline void *unwind_get_region_start(_Unwind_Context *ctx) {
     return reinterpret_cast<void *>(fp);
 }
 
+using OpenFn = int (*)(const char *, int, ...);
+static OpenFn old_open = nullptr;
+
+static int new_open(const char *pathname, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_list args;
+        va_start(args, flags);
+        mode = static_cast<mode_t>(va_arg(args, int));
+        va_end(args);
+    }
+    int fd = old_open ? old_open(pathname, flags, mode) : ::open(pathname, flags, mode);
+    if (fd >= 0 && tracer_pid::is_status_path(pathname)) {
+        tracer_pid::track_fd(fd);
+    }
+    return fd;
+}
+
+using OpenatFn = int (*)(int, const char *, int, ...);
+static OpenatFn old_openat = nullptr;
+
+static int new_openat(int dirfd, const char *pathname, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_list args;
+        va_start(args, flags);
+        mode = static_cast<mode_t>(va_arg(args, int));
+        va_end(args);
+    }
+    int fd = old_openat ? old_openat(dirfd, pathname, flags, mode) : ::openat(dirfd, pathname, flags, mode);
+    if (fd >= 0 && tracer_pid::is_status_path(pathname)) {
+        tracer_pid::track_fd(fd);
+    }
+    return fd;
+}
+
+using CloseFn = int (*)(int);
+static CloseFn old_close = nullptr;
+
+static int new_close(int fd) {
+    if (fd >= 0) {
+        tracer_pid::untrack_fd(fd);
+    }
+    return old_close ? old_close(fd) : ::close(fd);
+}
+
+using ReadFn = ssize_t (*)(int, void *, size_t);
+static ReadFn old_read = nullptr;
+
+static ssize_t new_read(int fd, void *buf, size_t count) {
+    ssize_t ret = old_read ? old_read(fd, buf, count) : ::read(fd, buf, count);
+    if (ret > 0 && buf != nullptr && tracer_pid::is_tracked_fd(fd)) {
+        tracer_pid::sanitize_tracer_pid(static_cast<char *>(buf), static_cast<size_t>(ret));
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------
 
 void HookContext::register_hook(dev_t dev, ino_t inode, const char *symbol, void *new_func,
@@ -326,6 +385,13 @@ void HookContext::register_hook(dev_t dev, ino_t inode, const char *symbol, void
         return;
     }
     plt_backup.emplace_back(dev, inode, symbol, old_func);
+}
+
+void HookContext::register_hook_optional(dev_t dev, ino_t inode, const char *symbol, void *new_func,
+                                         void **old_func) {
+    if (lsplt::RegisterHook(dev, inode, symbol, new_func, old_func)) {
+        plt_backup.emplace_back(dev, inode, symbol, old_func);
+    }
 }
 
 #define PLT_HOOK_REGISTER_SYM(DEV, INODE, SYM, NAME)                                               \
@@ -351,6 +417,31 @@ void HookContext::hook_plt() {
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, unshare);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, strdup);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, property_get);
+
+    // Precise FD-tracked TracerPid sanitization hooks on relevant runtime libraries
+    for (const auto &map : cached_map_infos) {
+        if (map.offset != 0 || !map.is_private || !(map.perms & PROT_READ)) continue;
+        if (map.path.ends_with("/libzygisk.so") || map.path.ends_with("/libc.so")) continue;
+
+        if (map.path.ends_with("/libandroid_runtime.so") ||
+            map.path.ends_with("/libart.so") ||
+            map.path.ends_with("/libjavacore.so") ||
+            map.path.ends_with("/libopenjdk.so") ||
+            map.path.ends_with("/libbase.so")) {
+            register_hook_optional(map.dev, map.inode, "open",
+                                   reinterpret_cast<void *>(new_open),
+                                   reinterpret_cast<void **>(&old_open));
+            register_hook_optional(map.dev, map.inode, "openat",
+                                   reinterpret_cast<void *>(new_openat),
+                                   reinterpret_cast<void **>(&old_openat));
+            register_hook_optional(map.dev, map.inode, "close",
+                                   reinterpret_cast<void *>(new_close),
+                                   reinterpret_cast<void **>(&old_close));
+            register_hook_optional(map.dev, map.inode, "read",
+                                   reinterpret_cast<void *>(new_read),
+                                   reinterpret_cast<void **>(&old_read));
+        }
+    }
 
     if (!lsplt::CommitHook(cached_map_infos)) LOGE("HookContext::hook_plt failed");
 
