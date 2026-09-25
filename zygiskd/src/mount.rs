@@ -157,12 +157,7 @@ impl MountNamespaceManager {
         let mount_infos = Process::myself()?.mountinfo()?;
         let mut unmount_targets: Vec<MountInfo> = Vec::new();
 
-        let root_source = match root_impl::get() {
-            root_impl::RootImpl::APatch => Some("APatch"),
-            root_impl::RootImpl::KernelSU => Some("KSU"),
-            root_impl::RootImpl::Magisk => Some("magisk"),
-            _ => None,
-        };
+        let root_sources: &[&str] = &["magisk", "KSU", "APatch", "kpatch"];
 
         let ksu_module_source: Option<String> =
             if matches!(root_impl::get(), root_impl::RootImpl::KernelSU) {
@@ -181,7 +176,7 @@ impl MountNamespaceManager {
 
             let should_unmount = info.root.starts_with("/adb/modules")
                 || path_str.starts_with("/data/adb/modules")
-                || (root_source.is_some() && mount_source_str == root_source)
+                || mount_source_str.map_or(false, |source| root_sources.contains(&source))
                 || (ksu_module_source.is_some() && info.mount_source == ksu_module_source);
 
             if should_unmount {
