@@ -23,9 +23,10 @@ use std::io::Error;
 use std::mem::size_of;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
+use std::collections::HashMap;
 use std::{
     os::unix::net::{UnixListener, UnixStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{atomic::{fence, Ordering}, Arc, Mutex, OnceLock},
     thread,
@@ -43,6 +44,7 @@ struct Module {
 struct AppContext {
     modules: Vec<Module>,
     mount_manager: Arc<MountNamespaceManager>,
+    zn_companions: Mutex<HashMap<PathBuf, UnixStream>>,
 }
 
 // Global paths, initialized once at startup.
@@ -88,6 +90,7 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
     let context = Arc::new(AppContext {
         modules,
         mount_manager,
+        zn_companions: Mutex::new(HashMap::new()),
     });
     let listener = create_daemon_socket()?;
 
@@ -132,6 +135,7 @@ fn handle_connection(mut stream: UnixStream, context: Arc<AppContext>) -> Result
             for module in &context.modules {
                 module.companion.lock().unwrap().take();
             }
+            context.zn_companions.lock().unwrap().clear();
         }
         DaemonSocketAction::SystemServerStarted => {
             let value = constants::SYSTEM_SERVER_STARTED;
@@ -168,6 +172,9 @@ fn handle_threaded_action(
         DaemonSocketAction::ReadModules => handle_read_modules(&mut stream, context),
         DaemonSocketAction::RequestCompanionSocket => {
             handle_request_companion_socket(&mut stream, context)
+        }
+        DaemonSocketAction::RequestZnCompanionSocket => {
+            handle_request_zn_companion_socket(&mut stream, context)
         }
         DaemonSocketAction::GetModuleDir => handle_get_module_dir(&mut stream, context),
         DaemonSocketAction::GetSharedMemoryFd => handle_get_shared_memory_fd(&mut stream),
@@ -558,6 +565,79 @@ fn handle_request_companion_socket(stream: &mut UnixStream, context: &AppContext
         stream.write_u8(0)?;
     }
     Ok(())
+}
+
+fn handle_request_zn_companion_socket(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
+    let lib_path = PathBuf::from(stream.read_string()?);
+
+    let mut table = context.zn_companions.lock().unwrap();
+
+    if let Some(sock) = table.get(&lib_path) {
+        if !utils::is_socket_alive(sock) {
+            warn!("ZN companion for `{}` appears to have crashed.", lib_path.display());
+            table.remove(&lib_path);
+        }
+    }
+
+    if !table.contains_key(&lib_path) {
+        match spawn_zn_companion(&lib_path) {
+            Ok(Some(sock)) => {
+                trace!("Spawned new ZN companion for `{}`.", lib_path.display());
+                table.insert(lib_path.clone(), sock);
+            }
+            Ok(None) => {
+                warn!("ZN module `{}` does not have a companion entry point.", lib_path.display());
+            }
+            Err(e) => {
+                warn!("Failed to spawn ZN companion for `{}`: {}", lib_path.display(), e);
+            }
+        }
+    }
+
+    if let Some(sock) = table.get(&lib_path) {
+        if let Err(e) = sock.send_fd(stream.as_raw_fd()) {
+            error!("Failed to send ZN companion FD for `{}`: {}", lib_path.display(), e);
+            stream.write_u8(0)?;
+        }
+        // If successful, the companion itself will notify the client.
+    } else {
+        stream.write_u8(0)?;
+    }
+    Ok(())
+}
+
+fn spawn_zn_companion(lib_path: &Path) -> Result<Option<UnixStream>> {
+    let (mut daemon_sock, companion_sock) = UnixStream::pair()?;
+    let self_exe = std::env::args().next().unwrap();
+
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            bail!(Error::last_os_error());
+        }
+
+        if pid == 0 {
+            drop(daemon_sock);
+            fcntl_setfd(companion_sock.as_fd(), FdFlags::empty())
+                .expect("Failed to clear CLOEXEC on ZN companion socket");
+
+            let companion_fd_str = format!("{}", companion_sock.as_raw_fd());
+            let err = Command::new(&self_exe)
+                .arg0("zygiskd-zn-companion")
+                .arg("zn-companion")
+                .arg(lib_path)
+                .arg(companion_fd_str)
+                .exec();
+            bail!("exec failed: {}", err);
+        }
+
+        drop(companion_sock);
+        match daemon_sock.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(daemon_sock)),
+            _ => bail!("Invalid response from ZN companion setup"),
+        }
+    }
 }
 
 fn handle_get_module_dir(stream: &mut UnixStream, context: &AppContext) -> Result<()> {

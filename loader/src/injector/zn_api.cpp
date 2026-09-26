@@ -547,51 +547,6 @@ const ZygiskNextAPI* getApiForVersion(int target_api_version) {
     return &kApiNoSymbolResolver;
 }
 
-[[noreturn]] void companionMain(const char* lib_path, int ctl_fd) {
-    void* lib = dlopenViaFd(lib_path, RTLD_NOW);
-    if (!lib) {
-        LOGE("companion: dlopen %s failed: %s", lib_path, dlerror());
-        _exit(1);
-    }
-
-    auto* m = reinterpret_cast<ZygiskNextCompanionModule*>(dlsym(lib, "zn_companion_module"));
-    if (!m || !m->onCompanionLoaded || !m->onModuleConnected) {
-        LOGE("companion: %s does not export zn_companion_module", lib_path);
-        _exit(1);
-    }
-
-    m->onCompanionLoaded();
-
-    for (;;) {
-        char cmd = 0;
-        int fd = -1;
-        struct iovec iov = {&cmd, sizeof(cmd)};
-        char cmsg_buf[CMSG_SPACE(sizeof(int))] = {0};
-        struct msghdr msg = {};
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cmsg_buf;
-        msg.msg_controllen = sizeof(cmsg_buf);
-
-        ssize_t n = recvmsg(ctl_fd, &msg, 0);
-        if (n <= 0) break;
-
-        if (cmd != kCmdConnect) continue;
-
-        for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
-                break;
-            }
-        }
-        if (fd >= 0) {
-            m->onModuleConnected(fd);
-            fd = -1;
-        }
-    }
-    _exit(0);
-}
-
 bool isHyosSpawner() {
     char buf[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);

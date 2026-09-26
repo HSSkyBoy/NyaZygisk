@@ -214,6 +214,22 @@ int ConnectCompanion(size_t index) {
     }
 }
 
+int ConnectZnCompanion(const std::string& lib_path) {
+    int fd = Connect(1);
+    if (fd == -1) {
+        PLOGE("ConnectZnCompanion");
+        return -1;
+    }
+    socket_utils::write_u8(fd, (uint8_t) SocketAction::RequestZnCompanionSocket);
+    socket_utils::write_string(fd, lib_path);
+    if (socket_utils::read_u8(fd) == 1) {
+        return fd;
+    } else {
+        close(fd);
+        return -1;
+    }
+}
+
 int GetModuleDir(size_t index) {
     UniqueFd fd = Connect(1);
     if (fd == -1) {

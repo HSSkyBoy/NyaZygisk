@@ -12,7 +12,6 @@ struct ZnModuleHandle {
 };
 
 const ZygiskNextAPI* getApiForVersion(int target_api_version);
-[[noreturn]] void companionMain(const char* lib_path, int ctl_fd);
 
 // HyperOS Runtime support
 bool isHyosSpawner();

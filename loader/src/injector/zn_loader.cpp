@@ -1,6 +1,7 @@
 #include "zn_loader.hpp"
 #include "zn_api.hpp"
 #include "logging.hpp"
+#include "daemon.hpp"
 #include "zygisk_next_api.h"
 
 #include <ctype.h>
@@ -159,21 +160,12 @@ void loadEntry(const ModuleEntry& e) {
     handle->lib_path = lib_path;
 
     if (e.companion && m->target_api_version >= 3) {
-        int sv[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == 0) {
-            pid_t pid = fork();
-            if (pid == 0) {
-                close(sv[0]);
-                companionMain(lib_path.c_str(), sv[1]);
-                _exit(0);
-            } else if (pid > 0) {
-                close(sv[1]);
-                handle->companion_fd = sv[0];
-                handle->companion_pid = pid;
-            } else {
-                close(sv[0]);
-                close(sv[1]);
-            }
+        int fd = zygiskd::ConnectZnCompanion(lib_path);
+        if (fd >= 0) {
+            handle->companion_fd = fd;
+        } else {
+            LOGW("ZN: failed to get companion socket for module %s from zygiskd",
+                 lib_path.c_str());
         }
     } else if (e.companion) {
         LOGW("ZN: module %s declares companion but targets API %d (< 3), skipping companion process",
