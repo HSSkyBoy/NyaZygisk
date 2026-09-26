@@ -331,31 +331,126 @@ function formatRootInfo(data, fallback) {
   return parts.length ? `${name} ${parts.join(" / ")}` : name;
 }
 
-function rootDetectionCommand() {
+function decodeBase64Utf8(b64) {
+  if (!b64) return "";
+  try {
+    const clean = b64.replace(/\s+/g, "");
+    const binary = atob(clean);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch (e) {
+    console.error("Base64 decode error:", e);
+    return "";
+  }
+}
+
+function parseSectionOutput(stdout) {
+  const sections = {};
+  let currentSection = null;
+  const buffer = [];
+
+  const lines = stdout.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("---") && trimmed.endsWith("---") && trimmed.length > 6) {
+      if (currentSection) {
+        sections[currentSection] = buffer.join("");
+        buffer.length = 0;
+      }
+      currentSection = trimmed.slice(3, -3);
+    } else if (currentSection && trimmed.length > 0) {
+      buffer.push(trimmed);
+    }
+  }
+  if (currentSection) {
+    sections[currentSection] = buffer.join("");
+  }
+
+  return {
+    prop: decodeBase64Utf8(sections.PROP || ""),
+    root: decodeBase64Utf8(sections.ROOT || ""),
+    config: decodeBase64Utf8(sections.CONFIG || ""),
+    modules: decodeBase64Utf8(sections.MODULES || ""),
+  };
+}
+
+function parseModulesRaw(rawText) {
+  if (!rawText) return [];
+  const modules = [];
+  const blocks = rawText.split("###");
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const newlineIdx = trimmed.indexOf("\n");
+    const id = newlineIdx >= 0 ? trimmed.slice(0, newlineIdx).trim() : trimmed;
+    const propContent = newlineIdx >= 0 ? trimmed.slice(newlineIdx + 1) : "";
+    const props = parseProp(propContent);
+    modules.push({
+      id: id,
+      name: props.name || id,
+      version: props.version || "",
+      author: props.author || "",
+      description: props.description || "",
+      type: "zygisk",
+      target: "zygote",
+      companion: false,
+    });
+  }
+  return modules;
+}
+
+function unifiedStatusCommand() {
   return [
-    "detect_root() {",
-    "  if command -v apd >/dev/null 2>&1 || [ -n \"${APATCH_VER_CODE:-}\" ] || [ -d /data/adb/ap ]; then",
-    "    echo root=APatch",
-    "    if [ -n \"${APATCH_VER_CODE:-}\" ]; then echo version=$APATCH_VER_CODE; fi",
-    "    if command -v apd >/dev/null 2>&1; then apd -V 2>/dev/null | head -n 1 | sed 's/^/version_text=/'; fi",
-    "    return",
-    "  fi",
-    "  if command -v ksud >/dev/null 2>&1 || [ -n \"${KSU:-}\" ] || [ -d /data/adb/ksu ]; then",
-    "    echo root=KernelSU",
-    "    if [ -n \"${KSU_KERNEL_VER_CODE:-}\" ]; then echo kernel_version=$KSU_KERNEL_VER_CODE; fi",
-    "    if [ -n \"${KSU_VER_CODE:-}\" ]; then echo manager_version=$KSU_VER_CODE; fi",
-    "    if command -v ksud >/dev/null 2>&1; then ksud -V 2>/dev/null | head -n 1 | sed 's/^/version_text=/'; fi",
-    "    return",
-    "  fi",
-    "  if command -v magisk >/dev/null 2>&1; then",
-    "    echo root=Magisk",
-    "    magisk -V 2>/dev/null | head -n 1 | sed 's/^/version=/'",
-    "    magisk -v 2>/dev/null | head -n 1 | sed 's/^/version_text=/'",
-    "    return",
-    "  fi",
-    "  echo root=Unknown",
-    "}",
-    "detect_root",
+    'dump_all() {',
+    '  echo "---PROP---"',
+    `  base64 < ${PROP_PATH} 2>/dev/null`,
+    '  echo "---ROOT---"',
+    '  {',
+    '    r="Unknown"',
+    '    pidof apd >/dev/null 2>&1 && r="APatch"',
+    '    pidof fpd >/dev/null 2>&1 && r="FolkPatch"',
+    '    [ -d /data/adb/ksu ] && r="KernelSU"',
+    '    pidof magiskd >/dev/null 2>&1 && r="Magisk"',
+    '    echo "root=$r"',
+    '    if [ "$r" = "APatch" ] || [ "$r" = "FolkPatch" ]; then',
+    '      if command -v apd >/dev/null 2>&1; then',
+    '        v=$(apd -V 2>/dev/null | head -n 1)',
+    '        [ -n "$v" ] && echo "version_text=$v"',
+    '      fi',
+    '    elif [ "$r" = "KernelSU" ]; then',
+    '      if command -v ksud >/dev/null 2>&1; then',
+    '        v=$(ksud -V 2>/dev/null | head -n 1)',
+    '        [ -n "$v" ] && echo "version_text=$v"',
+    '      fi',
+    '    elif [ "$r" = "Magisk" ]; then',
+    '      if command -v magisk >/dev/null 2>&1; then',
+    '        v=$(magisk -v 2>/dev/null | head -n 1)',
+    '        [ -n "$v" ] && echo "version_text=$v"',
+    '      fi',
+    '    fi',
+    '  } | base64',
+    '  echo "---CONFIG---"',
+    `  base64 < ${CONFIG_PATH} 2>/dev/null`,
+    '  echo "---MODULES---"',
+    '  {',
+    '    for d in /data/adb/modules/*; do',
+    '      [ -d "$d" ] || continue',
+    '      [ -f "$d/disable" ] && continue',
+    '      [ -f "$d/remove" ] && continue',
+    '      has_zy=0',
+    '      if [ -f "$d/zygisk/arm64-v8a.so" ] || [ -f "$d/zygisk/armeabi-v7a.so" ] || [ -f "$d/zygisk/x86_64.so" ] || [ -f "$d/zygisk/x86.so" ] || [ -f "$d/zn_modules.txt" ]; then',
+    '        has_zy=1',
+    '      fi',
+    '      [ "$has_zy" -eq 1 ] || continue',
+    '      echo "###${d##*/}"',
+    '      cat "$d/module.prop" 2>/dev/null',
+    '    done',
+    '  } | base64',
+    '}',
+    'dump_all',
   ].join("\n");
 }
 
@@ -379,16 +474,17 @@ async function refresh(showSuccessToast) {
     return;
   }
 
-  const result = await exec(`cat ${PROP_PATH} 2>/dev/null`);
-  if (result.code !== 0) {
+  const result = await exec(unifiedStatusCommand());
+  if (result.code !== 0 && !result.stdout) {
     renderFailure(result.stderr);
     showToast(result.stderr.includes("No supported") ? "bridge_missing" : "load_failed", true);
     return;
   }
 
-  const data = parseProp(result.stdout);
+  const sections = parseSectionOutput(result.stdout);
+  const data = parseProp(sections.prop);
+
   $("v-version").textContent = data.version || "-";
-  $("v-root").textContent = data.root_implementation || "-";
   $("v-kernel").textContent = data.device_kernel || "-";
   $("v-sdk").textContent = data.device_sdk || "-";
   $("v-abi").textContent = data.device_abi || "-";
@@ -403,54 +499,32 @@ async function refresh(showSuccessToast) {
   renderStatus("v-zygote", zygote.status);
   renderStatus("v-daemon", daemon.status);
 
-  const modules = parseModules(data);
-  $("v-modules-count").textContent = String(data.modules_count || modules.length || 0);
+  // Fast zero-fork modules parsing, fallback to daemon modules_list
+  let modules = parseModulesRaw(sections.modules);
+  if (!modules.length && data.modules_list) {
+    modules = parseModules(data);
+  }
+  $("v-modules-count").textContent = String(modules.length || data.modules_count || 0);
   renderModules(modules);
-  await refreshRootInfo(data.root_implementation);
-  await refreshConfig();
+
+  // Render Root Info
+  const rootData = parseProp(sections.root);
+  if (rootData.root && rootData.root !== "Unknown") {
+    $("v-root").textContent = formatRootInfo({
+      root: rootData.root,
+      version: rootData.version_text || rootData.version,
+    }, data.root_implementation);
+  } else {
+    $("v-root").textContent = data.root_implementation || "-";
+  }
+
+  // Render Anonymous Memory Config
+  const configData = parseProp(sections.config);
+  $("anonymous-memory").checked = configData.anonymous_memory === "1";
 
   if (showSuccessToast) {
     showToast("reloaded");
   }
-}
-
-async function refreshRootInfo(fallback) {
-  const exec = window.NeoZygiskWebUi && window.NeoZygiskWebUi.exec;
-  if (typeof exec !== "function") {
-    $("v-root").textContent = fallback || "-";
-    return;
-  }
-
-  const result = await exec(rootDetectionCommand());
-  if (result.code !== 0) {
-    $("v-root").textContent = fallback || t("root_detect_failed");
-    return;
-  }
-
-  const data = parseProp(result.stdout);
-  if (!data.root || data.root === "Unknown") {
-    $("v-root").textContent = fallback || "-";
-    return;
-  }
-
-  const versionText = data.version_text && !data.version ? data.version_text : "";
-  $("v-root").textContent = formatRootInfo({
-    root: data.root,
-    version: data.version || versionText,
-    kernel_version: data.kernel_version,
-    manager_version: data.manager_version,
-  }, fallback);
-}
-
-async function refreshConfig() {
-  const exec = window.NeoZygiskWebUi && window.NeoZygiskWebUi.exec;
-  if (typeof exec !== "function") {
-    return;
-  }
-
-  const result = await exec(`cat ${CONFIG_PATH} 2>/dev/null`);
-  const data = result.code === 0 ? parseProp(result.stdout) : {};
-  $("anonymous-memory").checked = data.anonymous_memory === "1";
 }
 
 async function saveAnonymousMemory(enabled) {
