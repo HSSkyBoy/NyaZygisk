@@ -66,6 +66,7 @@ enum class SocketAction {
     ZygoteRestart,
     SystemServerStarted,
     GetSharedMemoryFd,
+    RequestZnCompanionSocket,
 };
 
 enum class MountNamespace { Clean, Root };
@@ -87,6 +88,8 @@ void CacheMountNamespace(pid_t pid);
 int UpdateMountNamespace(MountNamespace type);
 
 int ConnectCompanion(size_t index);
+
+int ConnectZnCompanion(const std::string& lib_path);
 
 int GetModuleDir(size_t index);
 
