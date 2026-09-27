@@ -1,6 +1,8 @@
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
-allow zygote zygisk_file sock_file {read write}
+allow zygote zygisk_file sock_file {read write getattr open}
+allow appdomain zygisk_file sock_file {read write getattr open}
+allow system_server zygisk_file sock_file {read write getattr open}
 
 allow zygote magisk lnk_file read
 allow zygote unlabeled file {read open}
@@ -13,17 +15,13 @@ allow zygote zygote process execmem
 allow system_server system_server process execmem
 allow zygote tmpfs file *
 allow zygote appdomain_tmpfs file *
+allow appdomain tmpfs file {open getattr map read execute}
+allow system_server tmpfs file {open getattr map read execute}
 allow zygote magisk memfd_file {getattr read write map execute}
 allow zygote su memfd_file {getattr read write map execute}
+allow appdomain magisk memfd_file {getattr read write map execute}
+allow appdomain su memfd_file {getattr read write map execute}
+allow system_server magisk memfd_file {getattr read write map execute}
+allow system_server su memfd_file {getattr read write map execute}
 allow zygote proc file *
 allow zygote nsfs file *
-
-# Allow any process to execute files and read/map tmpfs (memfd), aligned with ZNN
-allow * * file execute
-allow * tmpfs file { open getattr map read execute }
-allow * appdomain_tmpfs file { open getattr map read execute }
-
-# Allow any domain (such as hyos_spawner) to connect to zygiskd socket
-allow * zygisk_file sock_file { read write getattr open }
-allow * zygisk_file dir { search getattr }
-
