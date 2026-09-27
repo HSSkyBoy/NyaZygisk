@@ -1,4 +1,5 @@
 #include "zn_api.hpp"
+#include "daemon.hpp"
 
 #include "elf_util.h"
 #include "logging.hpp"
@@ -32,59 +33,7 @@ struct ZnSymbolResolver {
 
 namespace zn {
 
-// Helper: load library from memfd to bypass namespace restrictions
-void* dlopenViaFd(const char* path, int flags) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOGE("dlopen %s: cannot open: %s", path, strerror(errno));
-        return nullptr;
-    }
-
-    int memfd = static_cast<int>(syscall(SYS_memfd_create, "znn-module", MFD_CLOEXEC));
-    if (memfd < 0) {
-        LOGE("dlopen %s: memfd_create failed: %s", path, strerror(errno));
-        close(fd);
-        return nullptr;
-    }
-
-    char buf[16384];
-    ssize_t n;
-    bool ok = true;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        ssize_t left = n;
-        const char* p = buf;
-        while (left > 0) {
-            ssize_t w = write(memfd, p, static_cast<size_t>(left));
-            if (w <= 0) {
-                ok = false;
-                break;
-            }
-            p += w;
-            left -= w;
-        }
-        if (!ok) break;
-    }
-    close(fd);
-    if (!ok || n < 0) {
-        LOGE("dlopen %s: copy to memfd failed: %s", path, strerror(errno));
-        close(memfd);
-        return nullptr;
-    }
-
-    android_dlextinfo extinfo = {};
-    extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
-    extinfo.library_fd = memfd;
-
-    void* lib = android_dlopen_ext(path, flags, &extinfo);
-    if (!lib) {
-        LOGE("dlopen %s via memfd failed: %s", path, dlerror());
-    }
-    return lib;
-}
-
 namespace {
-
-constexpr char kCmdConnect = 1;
 
 std::mutex g_hook_mutex;
 std::set<uintptr_t> g_hooked;
@@ -221,34 +170,10 @@ void api_forEachSymbols(ZnSymbolResolver* resolver,
 
 int api_connectCompanion(void* handle) {
     auto* h = static_cast<ZnModuleHandle*>(handle);
-    if (!h || h->companion_fd < 0) return -1;
-
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) return -1;
-
-    char cmd = kCmdConnect;
-    struct iovec iov = {&cmd, sizeof(cmd)};
-    char cmsg_buf[CMSG_SPACE(sizeof(int))] = {0};
-    struct msghdr msg = {};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf;
-    msg.msg_controllen = sizeof(cmsg_buf);
-
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &sv[1], sizeof(int));
-    msg.msg_controllen = cmsg->cmsg_len;
-
-    if (sendmsg(h->companion_fd, &msg, 0) < 0) {
-        close(sv[0]);
-        close(sv[1]);
+    if (!h || !h->companion || h->target_api_version < 3 || h->lib_path.empty()) {
         return -1;
     }
-    close(sv[1]);
-    return sv[0];
+    return zygiskd::ConnectZnCompanion(h->lib_path);
 }
 
 // Helper: Raw inline hook via Dobby

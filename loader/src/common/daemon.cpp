@@ -230,6 +230,34 @@ int ConnectZnCompanion(const std::string& lib_path) {
     }
 }
 
+std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path) {
+    std::vector<ZnPlanEntry> entries;
+    UniqueFd fd = Connect(1);
+    if (fd == -1) {
+        PLOGE("GetZnPlan: Connect");
+        return entries;
+    }
+    if (!socket_utils::write_u8(fd, (uint8_t) SocketAction::GetZnPlan) ||
+        !socket_utils::write_string(fd, process_name) ||
+        !socket_utils::write_string(fd, process_path)) {
+        PLOGE("GetZnPlan: write request");
+        return entries;
+    }
+
+    size_t count = socket_utils::read_usize(fd);
+    for (size_t i = 0; i < count; ++i) {
+        std::string lib_path = socket_utils::read_string(fd);
+        uint8_t companion = socket_utils::read_u8(fd);
+        int memfd = socket_utils::recv_fd(fd);
+        if (memfd < 0) {
+            LOGE("GetZnPlan: failed to receive FD for module %s", lib_path.c_str());
+            continue;
+        }
+        entries.emplace_back(std::move(lib_path), companion != 0, memfd);
+    }
+    return entries;
+}
+
 int GetModuleDir(size_t index) {
     UniqueFd fd = Connect(1);
     if (fd == -1) {

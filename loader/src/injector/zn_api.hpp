@@ -7,8 +7,8 @@ namespace zn {
 
 struct ZnModuleHandle {
     std::string lib_path;
-    int companion_fd = -1;
-    pid_t companion_pid = -1;
+    bool companion = false;
+    int target_api_version = 0;
 };
 
 const ZygiskNextAPI* getApiForVersion(int target_api_version);

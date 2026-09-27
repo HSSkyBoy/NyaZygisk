@@ -733,7 +733,8 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
 
         bool is_zygote = (clean_prog == monitor_.get_abi_manager().program_path_);
 #if defined(__LP64__)
-        bool is_hyos_spawner = (clean_prog == "/system_ext/bin/hyos_spawner");
+        bool is_hyos_spawner = (clean_prog == "/system_ext/bin/hyos_spawner" ||
+                                clean_prog.ends_with("/hyos_spawner"));
 #else
         bool is_hyos_spawner = false;
 #endif

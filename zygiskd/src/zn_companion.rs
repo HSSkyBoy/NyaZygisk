@@ -75,6 +75,23 @@ fn run_zn_companion(lib_path: &str, fd: i32) -> Result<()> {
             lib_path, client_fd
         );
 
+        let ack: u8 = 1;
+        let written = unsafe {
+            libc::write(
+                client_fd,
+                &ack as *const u8 as *const libc::c_void,
+                1,
+            )
+        };
+        if written != 1 {
+            error!(
+                "Failed to write ack to ZN companion client for `{}`: fd={}",
+                lib_path, client_fd
+            );
+            unsafe { libc::close(client_fd) };
+            continue;
+        }
+
         let on_connected = module.on_module_connected;
         thread::spawn(move || {
             if let Some(cb) = on_connected {
