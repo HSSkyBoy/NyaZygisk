@@ -1,4 +1,5 @@
 #include "zn_api.hpp"
+#include "daemon.hpp"
 
 #include "elf_util.h"
 #include "logging.hpp"
@@ -32,59 +33,7 @@ struct ZnSymbolResolver {
 
 namespace zn {
 
-// Helper: load library from memfd to bypass namespace restrictions
-void* dlopenViaFd(const char* path, int flags) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        LOGE("dlopen %s: cannot open: %s", path, strerror(errno));
-        return nullptr;
-    }
-
-    int memfd = static_cast<int>(syscall(SYS_memfd_create, "znn-module", MFD_CLOEXEC));
-    if (memfd < 0) {
-        LOGE("dlopen %s: memfd_create failed: %s", path, strerror(errno));
-        close(fd);
-        return nullptr;
-    }
-
-    char buf[16384];
-    ssize_t n;
-    bool ok = true;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        ssize_t left = n;
-        const char* p = buf;
-        while (left > 0) {
-            ssize_t w = write(memfd, p, static_cast<size_t>(left));
-            if (w <= 0) {
-                ok = false;
-                break;
-            }
-            p += w;
-            left -= w;
-        }
-        if (!ok) break;
-    }
-    close(fd);
-    if (!ok || n < 0) {
-        LOGE("dlopen %s: copy to memfd failed: %s", path, strerror(errno));
-        close(memfd);
-        return nullptr;
-    }
-
-    android_dlextinfo extinfo = {};
-    extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
-    extinfo.library_fd = memfd;
-
-    void* lib = android_dlopen_ext(path, flags, &extinfo);
-    if (!lib) {
-        LOGE("dlopen %s via memfd failed: %s", path, dlerror());
-    }
-    return lib;
-}
-
 namespace {
-
-constexpr char kCmdConnect = 1;
 
 std::mutex g_hook_mutex;
 std::set<uintptr_t> g_hooked;
@@ -221,34 +170,10 @@ void api_forEachSymbols(ZnSymbolResolver* resolver,
 
 int api_connectCompanion(void* handle) {
     auto* h = static_cast<ZnModuleHandle*>(handle);
-    if (!h || h->companion_fd < 0) return -1;
-
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) return -1;
-
-    char cmd = kCmdConnect;
-    struct iovec iov = {&cmd, sizeof(cmd)};
-    char cmsg_buf[CMSG_SPACE(sizeof(int))] = {0};
-    struct msghdr msg = {};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf;
-    msg.msg_controllen = sizeof(cmsg_buf);
-
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &sv[1], sizeof(int));
-    msg.msg_controllen = cmsg->cmsg_len;
-
-    if (sendmsg(h->companion_fd, &msg, 0) < 0) {
-        close(sv[0]);
-        close(sv[1]);
+    if (!h || !h->companion || h->target_api_version < 3 || h->lib_path.empty()) {
         return -1;
     }
-    close(sv[1]);
-    return sv[0];
+    return zygiskd::ConnectZnCompanion(h->lib_path);
 }
 
 // Helper: Raw inline hook via Dobby
@@ -263,14 +188,19 @@ constexpr int kMaxHyosModules = 16;
 bool g_hyos_runtime = false;
 ZygiskNextHyosModule g_hyos_modules[kMaxHyosModules] = {};
 int g_hyos_module_count = 0;
-bool g_hyos_in_child = false;
 bool g_hyos_fired = false;
+bool g_hyos_atfork_registered = false;
+pid_t g_spawner_pid = 0;
 
-typedef pid_t (*HyosForkFn)();
+// Raw syscall: bionic's cached getpid() is stale in children created by a raw clone(),
+// and the spawner is not guaranteed to go through libc fork().
+bool hyosInChild() {
+    return g_spawner_pid != 0 && static_cast<pid_t>(syscall(__NR_getpid)) != g_spawner_pid;
+}
+
 typedef int (*HyosSetcontextFn)(uid_t uid, int is_system_server, const char* se_info,
                                 const char* pkg_name);
 typedef int (*HyosSetnameFn)(pthread_t thread, const char* name);
-HyosForkFn g_orig_fork = nullptr;
 HyosSetcontextFn g_orig_setcontext = nullptr;
 HyosSetnameFn g_orig_setname = nullptr;
 bool g_hyos_warned = false;
@@ -310,7 +240,7 @@ bool readProcCmdline(char* out, size_t max_len) {
 }
 
 void hyosDeliverAppSpecialized(const char* pkg_name, const char* se_info) {
-    if (!g_hyos_in_child || g_hyos_fired || g_hyos_module_count == 0) return;
+    if (!hyosInChild() || g_hyos_fired || g_hyos_module_count == 0) return;
     g_hyos_fired = true;
 
     char process_name[256] = {};
@@ -345,7 +275,7 @@ int hyosSetcontextHook(uid_t uid, int is_system_server, const char* se_info,
                                 : -1;
     if (ret == 0) {
         hyosDeliverAppSpecialized(pkg_name, se_info);
-    } else if (!g_hyos_fired && g_hyos_in_child) {
+    } else if (!g_hyos_fired && hyosInChild()) {
         LOGW("HYOS: selinux_android_setcontext failed (%d)", ret);
     }
     return ret;
@@ -353,28 +283,13 @@ int hyosSetcontextHook(uid_t uid, int is_system_server, const char* se_info,
 
 int hyosSetnameHook(pthread_t thread, const char* name) {
     int ret = g_orig_setname ? g_orig_setname(thread, name) : -1;
-    if (ret == 0 && !g_cap_has_process_name && g_hyos_in_child && !g_hyos_fired &&
-        thread == pthread_self() && name && name[0] != '\0') {
+    if (ret == 0 && !g_cap_has_process_name && !g_hyos_fired && name && name[0] != '\0' &&
+        pthread_equal(thread, pthread_self()) && hyosInChild()) {
         strlcpy(g_cap_process_name, name, sizeof(g_cap_process_name));
         g_cap_has_process_name = true;
         LOGI("HYOS: captured process name %s", g_cap_process_name);
     }
     return ret;
-}
-
-void hyosAtForkChild() {
-    g_hyos_in_child = true;
-    g_hyos_fired = false;
-    g_cap_has_process_name = false;
-    g_cap_process_name[0] = '\0';
-}
-
-pid_t hyosForkHook() {
-    pid_t res = g_orig_fork ? g_orig_fork() : -1;
-    if (res == 0) {
-        hyosAtForkChild();
-    }
-    return res;
 }
 
 void hyosInstallHooks();
@@ -403,31 +318,25 @@ void hyosInstallHooks() {
         }
     }
 
-    // Try PLT hook on hyos_spawner first
-    if (g_spawner_inode != 0) {
-        if (!g_orig_fork) {
-            void* backup = nullptr;
-            if (lsplt::RegisterHook(g_spawner_dev, g_spawner_inode, "fork",
-                                    reinterpret_cast<void*>(hyosForkHook), &backup)) {
-                if (lsplt::CommitHook() && backup) {
-                    g_orig_fork = reinterpret_cast<HyosForkFn>(backup);
-                    LOGI("HYOS: PLT hooked fork in hyos_spawner");
-                }
-            }
+    // PLT hooks on the spawner image first: they need no execmem, which the spawner's
+    // SELinux domain is unlikely to have.
+    auto pltHookSpawner = [](const char* symbol, void* hook, void** orig) {
+        if (g_spawner_inode == 0 || *orig) return;
+        void* backup = nullptr;
+        if (lsplt::RegisterHook(g_spawner_dev, g_spawner_inode, symbol, hook, &backup) &&
+            lsplt::CommitHook() && backup) {
+            *orig = backup;
+            LOGI("HYOS: PLT hooked %s in hyos_spawner", symbol);
+        } else {
+            LOGW("HYOS: PLT hook of %s failed, falling back to inline hook", symbol);
         }
-        if (!g_orig_setcontext) {
-            void* backup = nullptr;
-            if (lsplt::RegisterHook(g_spawner_dev, g_spawner_inode, "selinux_android_setcontext",
-                                    reinterpret_cast<void*>(hyosSetcontextHook), &backup)) {
-                if (lsplt::CommitHook() && backup) {
-                    g_orig_setcontext = reinterpret_cast<HyosSetcontextFn>(backup);
-                    LOGI("HYOS: PLT hooked selinux_android_setcontext in hyos_spawner");
-                }
-            }
-        }
-    }
+    };
+    pltHookSpawner("selinux_android_setcontext", reinterpret_cast<void*>(hyosSetcontextHook),
+                   reinterpret_cast<void**>(&g_orig_setcontext));
+    pltHookSpawner("pthread_setname_np", reinterpret_cast<void*>(hyosSetnameHook),
+                   reinterpret_cast<void**>(&g_orig_setname));
 
-    // 2. Fallback / supplementary Inline Hook (ZNN style)
+    // 2. Fallback Inline Hook (ZNN style)
     if (!g_orig_setcontext) {
         void* fn = dlsym(RTLD_DEFAULT, "selinux_android_setcontext");
         if (!fn) {
@@ -471,8 +380,11 @@ int api_hyos_registerModule(const void* module) {
     }
     g_hyos_modules[g_hyos_module_count++] = *m;
 
-    if (!g_hyos_in_child) {
-        pthread_atfork(hyosAtForkPrepare, nullptr, hyosAtForkChild);
+    if (!hyosInChild()) {
+        if (!g_hyos_atfork_registered) {
+            g_hyos_atfork_registered = true;
+            pthread_atfork(hyosAtForkPrepare, nullptr, nullptr);
+        }
         hyosInstallHooks();
     }
     LOGI("HYOS: module registered (%d)", g_hyos_module_count);
@@ -561,6 +473,7 @@ bool isHyosSpawner() {
 
 void initHyosRuntime() {
     g_hyos_runtime = true;
+    g_spawner_pid = static_cast<pid_t>(syscall(__NR_getpid));
     LOGI("ZN: HyperOS Runtime enabled in pid %d", getpid());
 }
 

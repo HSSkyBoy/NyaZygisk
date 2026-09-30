@@ -178,6 +178,7 @@ fn handle_threaded_action(
         }
         DaemonSocketAction::GetModuleDir => handle_get_module_dir(&mut stream, context),
         DaemonSocketAction::GetSharedMemoryFd => handle_get_shared_memory_fd(&mut stream),
+        DaemonSocketAction::GetZnPlan => handle_get_zn_plan(&mut stream, context),
         // Other cases are handled synchronously and won't reach here.
         _ => unreachable!(),
     }
@@ -646,6 +647,161 @@ fn handle_get_module_dir(stream: &mut UnixStream, context: &AppContext) -> Resul
     let dir_path = format!("{}/{}", constants::PATH_MODULES_DIR, module.name);
     let dir = fs::File::open(dir_path)?;
     stream.send_fd(dir.as_raw_fd())?;
+    Ok(())
+}
+
+struct ZnPlanModule {
+    lib_path: String,
+    companion: bool,
+    lib_fd: OwnedFd,
+}
+
+fn is_elf_matching_arch(path: &Path) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    use std::io::Read;
+    let mut header = [0u8; 5];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    if &header[..4] != b"\x7FELF" {
+        return false;
+    }
+    let expected_class = if cfg!(target_pointer_width = "64") { 2 } else { 1 };
+    header[4] == expected_class
+}
+
+fn scan_zn_modules_for_target(process_name: &str, process_path: &str) -> Result<Vec<ZnPlanModule>> {
+    let mut results = Vec::new();
+    let dir = match fs::read_dir(constants::PATH_MODULES_DIR) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to read modules directory for ZN: {}", e);
+            return Ok(results);
+        }
+    };
+
+    let mut seen_libs = std::collections::HashSet::new();
+
+    for entry in dir.flatten() {
+        let mod_dir = entry.path();
+        let disabled = mod_dir.join("disable");
+        let remove = mod_dir.join("remove");
+        let zn_file = mod_dir.join("zn_modules.txt");
+
+        if !zn_file.exists() || disabled.exists() || remove.exists() {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&zn_file) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read {}: {}", zn_file.display(), e);
+                continue;
+            }
+        };
+
+        for line in content.lines() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() < 2 {
+                continue;
+            }
+
+            let first = tokens[0];
+            let target_matches = if let Some(target_name) = first.strip_prefix("name=") {
+                if target_name == "zygote" || target_name == "zygote64" || target_name == "zygote32" {
+                    process_name.contains("zygote") || process_name.contains("app_process")
+                } else {
+                    process_name == target_name
+                }
+            } else if let Some(target_path) = first.strip_prefix("path=") {
+                process_path == target_path
+            } else {
+                false
+            };
+
+            if !target_matches {
+                continue;
+            }
+
+            let companion = tokens[1..tokens.len() - 1].contains(&"companion");
+            let lib_subpath = tokens.last().unwrap();
+
+            let candidate = if lib_subpath.starts_with('/') {
+                PathBuf::from(lib_subpath)
+            } else {
+                mod_dir.join(lib_subpath)
+            };
+
+            let canonical_mod = match fs::canonicalize(&mod_dir) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let canonical_lib = match fs::canonicalize(&candidate) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if !canonical_lib.starts_with(&canonical_mod) || canonical_lib == canonical_mod {
+                warn!(
+                    "ZN module lib `{}` is outside module dir `{}`",
+                    canonical_lib.display(),
+                    canonical_mod.display()
+                );
+                continue;
+            }
+
+            if !is_elf_matching_arch(&canonical_lib) {
+                trace!(
+                    "Skipping ZN module lib `{}`: architecture mismatch",
+                    canonical_lib.display()
+                );
+                continue;
+            }
+
+            let lib_path_str = canonical_lib.to_string_lossy().into_owned();
+            if seen_libs.contains(&lib_path_str) {
+                continue;
+            }
+
+            match create_library_fd(&canonical_lib) {
+                Ok(lib_fd) => {
+                    info!(
+                        "ZN: prepared module `{}` for {} (companion={})",
+                        lib_path_str, process_name, companion
+                    );
+                    seen_libs.insert(lib_path_str.clone());
+                    results.push(ZnPlanModule {
+                        lib_path: lib_path_str,
+                        companion,
+                        lib_fd,
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to create memfd for ZN module `{}`: {}", lib_path_str, e);
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+fn handle_get_zn_plan(stream: &mut UnixStream, _context: &AppContext) -> Result<()> {
+    let process_name = stream.read_string()?;
+    let process_path = stream.read_string()?;
+    debug!("GetZnPlan request for process: name={}, path={}", process_name, process_path);
+
+    let matching = scan_zn_modules_for_target(&process_name, &process_path)?;
+    stream.write_usize(matching.len())?;
+
+    for m in matching {
+        stream.write_string(&m.lib_path)?;
+        stream.write_u8(if m.companion { 1 } else { 0 })?;
+        stream.send_fd(m.lib_fd.as_raw_fd())?;
+    }
     Ok(())
 }
 

@@ -14,8 +14,8 @@
  * @param flags The flags to be passed to dlopen (e.g., RTLD_LAZY).
  * @return A handle to the opened library on success, or nullptr on failure.
  */
-void* DlopenMem(int fd, int flags) {
-    constexpr const char* JIT_CACHE_NAME = "/jit-cache-zygisk";
+void* DlopenMem(int fd, int flags, const char* name) {
+    const char* display_name = (name && name[0] != '\0') ? name : "/jit-cache-zygisk";
 
     android_dlextinfo info{.flags = ANDROID_DLEXT_USE_LIBRARY_FD,
                            .reserved_addr = nullptr,
@@ -25,11 +25,11 @@ void* DlopenMem(int fd, int flags) {
                            .library_fd_offset = 0,
                            .library_namespace = nullptr};
 
-    void* handle = android_dlopen_ext(JIT_CACHE_NAME, flags, &info);
+    void* handle = android_dlopen_ext(display_name, flags, &info);
     if (handle) {
-        LOGV("dlopen_ext from fd %d succeeded: handle %p", fd, handle);
+        LOGV("dlopen_ext %s from fd %d succeeded: handle %p", display_name, fd, handle);
     } else {
-        LOGE("dlopen_ext from fd %d failed: %s", fd, dlerror());
+        LOGE("dlopen_ext %s from fd %d failed: %s", display_name, fd, dlerror());
     }
     return handle;
 }

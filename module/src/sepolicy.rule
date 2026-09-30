@@ -1,6 +1,7 @@
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
-allow zygote zygisk_file sock_file {read write}
+allow domain zygisk_file dir {search getattr}
+allow domain zygisk_file sock_file {read write getattr open}
 
 allow zygote magisk lnk_file read
 allow zygote unlabeled file {read open}
@@ -8,12 +9,15 @@ allow zygote zygote capability sys_chroot
 allow zygote su dir search
 allow zygote su {lnk_file file} read
 
-allow zygote adb_data_file dir search
+allow domain adb_data_file dir search
 allow zygote zygote process execmem
 allow system_server system_server process execmem
 allow zygote tmpfs file *
 allow zygote appdomain_tmpfs file *
+allow domain tmpfs file {open getattr map read execute}
 allow zygote magisk memfd_file {getattr read write map execute}
 allow zygote su memfd_file {getattr read write map execute}
+allow domain magisk memfd_file {getattr read write map execute}
+allow domain su memfd_file {getattr read write map execute}
 allow zygote proc file *
 allow zygote nsfs file *

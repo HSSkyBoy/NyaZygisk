@@ -17,7 +17,8 @@ void entry(void* addr, size_t size, const char* path) {
     if (zn::isHyosSpawner()) {
         LOGI("Running inside hyos_spawner, initializing HyperOS Runtime");
         zn::initHyosRuntime();
-        zn::loadAllModules();
+        // The daemon may have been spawned moments ago for this very process.
+        zn::loadAllModules(5);
         return;
     }
 
