@@ -104,7 +104,8 @@ int ConnectCompanion(size_t index);
 
 int ConnectZnCompanion(const std::string& lib_path);
 
-std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path);
+std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path,
+                                   uint8_t retry = 1);
 
 int GetModuleDir(size_t index);
 

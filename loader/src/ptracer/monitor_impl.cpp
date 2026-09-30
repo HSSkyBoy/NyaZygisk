@@ -745,14 +745,11 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
 
         const char *tracer;
         if (is_hyos_spawner) {
-            // For hyos_spawner, only retrieve the tracer path — do NOT run
-            // crash-loop detection or daemon creation, which are Zygote-specific.
-            // Reusing check_and_prepare_injection() would corrupt the Zygote
-            // crash-loop counter and reset zygote_injected to false on every
-            // hyos_spawner exec.
-            tracer = monitor_.get_abi_manager().tracer_path();
+            // Not check_and_prepare_injection(): that would count hyos_spawner execs
+            // in the Zygote crash-loop counter and reset zygote_injected.
+            tracer = monitor_.get_abi_manager().prepare_aux_injection();
             if (!tracer) {
-                LOGE("failed to get tracer path for hyos_spawner %d", pid);
+                LOGE("daemon unavailable, skipping hyos_spawner %d", pid);
                 break;
             }
         } else {

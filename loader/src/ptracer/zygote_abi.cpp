@@ -40,7 +40,6 @@ bool ZygoteAbiManager::is_in_crash_loop() {
 }
 
 bool ZygoteAbiManager::ensure_daemon_created() {
-    status_.zygote_injected = false;
     if (status_.daemon_pid == -1) {
         auto pid = fork();
         if (pid < 0) {
@@ -72,11 +71,16 @@ const char* ZygoteAbiManager::check_and_prepare_injection() {
         monitor_.request_stop("zygote crashed");
         return nullptr;
     }
+    status_.zygote_injected = false;
     if (!ensure_daemon_created()) {
         monitor_.request_stop("daemon not running");
         return nullptr;
     }
     return tracer_path_;
+}
+
+const char* ZygoteAbiManager::prepare_aux_injection() {
+    return ensure_daemon_created() ? tracer_path_ : nullptr;
 }
 
 bool ZygoteAbiManager::handle_daemon_exit_if_match(int pid, int process_status) {

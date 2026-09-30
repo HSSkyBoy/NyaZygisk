@@ -76,13 +76,13 @@ void loadEntry(const zygiskd::ZnPlanEntry& entry) {
 
 }  // namespace
 
-void loadAllModules() {
+void loadAllModules(unsigned char connect_retry) {
     const std::string proc_name = getProcessName();
     const std::string proc_path = getProcessPath();
     LOGI("ZN: requesting boot plan for pid %d (name=%s, path=%s)", getpid(),
          proc_name.c_str(), proc_path.c_str());
 
-    auto plan = zygiskd::GetZnPlan(proc_name, proc_path);
+    auto plan = zygiskd::GetZnPlan(proc_name, proc_path, connect_retry);
     LOGI("ZN: received %zu module(s) from daemon", plan.size());
 
     for (const auto& entry : plan) {
