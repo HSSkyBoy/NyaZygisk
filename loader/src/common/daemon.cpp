@@ -3,6 +3,7 @@
 #include <linux/un.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -50,6 +51,21 @@ void UnmapSharedMemory() {
 
 std::string GetTmpPath() { return TMP_PATH; }
 
+// Bounds how long a request can block on the daemon once connected. Without this,
+// a stalled or overloaded daemon leaves the caller (potentially a zygote/app
+// process mid-specialize) hung forever on read()/recvmsg(), since plain blocking
+// sockets have no deadline of their own.
+constexpr int kDaemonIoTimeoutMs = 3000;
+
+static void SetSocketTimeout(int fd, int timeout_ms) {
+    struct timeval tv{
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
 int Connect(uint8_t retry) {
     int fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un addr{
@@ -62,7 +78,10 @@ int Connect(uint8_t retry) {
 
     while (retry--) {
         int r = connect(fd, reinterpret_cast<struct sockaddr *>(&addr), socklen);
-        if (r == 0) return fd;
+        if (r == 0) {
+            SetSocketTimeout(fd, kDaemonIoTimeoutMs);
+            return fd;
+        }
         if (retry) {
             LOGW("retrying to connect to zygiskd, sleep 1s");
             sleep(1);
@@ -207,6 +226,9 @@ int ConnectCompanion(size_t index) {
     socket_utils::write_u8(fd, (uint8_t) SocketAction::RequestCompanionSocket);
     socket_utils::write_usize(fd, index);
     if (socket_utils::read_u8(fd) == 1) {
+        // Past this point the fd is handed to the module's own companion protocol,
+        // which may legitimately block far longer than our daemon handshake timeout.
+        SetSocketTimeout(fd, 0);
         return fd;
     } else {
         close(fd);
@@ -223,6 +245,9 @@ int ConnectZnCompanion(const std::string& lib_path) {
     socket_utils::write_u8(fd, (uint8_t) SocketAction::RequestZnCompanionSocket);
     socket_utils::write_string(fd, lib_path);
     if (socket_utils::read_u8(fd) == 1) {
+        // Same as ConnectCompanion: hand the fd back to the ZN module's own
+        // companion protocol unconstrained by our handshake timeout.
+        SetSocketTimeout(fd, 0);
         return fd;
     } else {
         close(fd);
