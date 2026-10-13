@@ -64,6 +64,7 @@ const I18N = {
     apps_no_match: "No matching apps",
     pending_restart: "Restart app",
     shared_uid: "Shares a UID with {n} other package(s); they switch together",
+    shared_uid_system: "Shares a UID with a system package and cannot be excluded",
   },
   "zh-Hant": {
     language: "語言",
@@ -120,6 +121,7 @@ const I18N = {
     apps_no_match: "沒有符合的應用",
     pending_restart: "待重啟",
     shared_uid: "與另外 {n} 個套件共用 UID，會一起切換",
+    shared_uid_system: "與系統套件共用 UID，無法排除",
   },
   "zh-Hans": {
     language: "语言",
@@ -176,6 +178,7 @@ const I18N = {
     apps_no_match: "没有匹配的应用",
     pending_restart: "待重启",
     shared_uid: "与另外 {n} 个包共用 UID，会一起切换",
+    shared_uid_system: "与系统包共用 UID，无法排除",
   },
 };
 
@@ -189,7 +192,7 @@ let snapshot = null;
 // User apps as { pkg, label, appId }, plus every installed package grouped by app id.
 let userApps = [];
 let appIdGroups = new Map();
-let installedPackages = new Set();
+let userPackages = new Set();
 let appsState = "loading";
 let appFilter = "all";
 
@@ -688,6 +691,7 @@ async function refresh(showSuccessToast) {
   try {
     // Never read config.prop while a write is still in flight.
     await configWrite;
+    const writeBeforeRead = configWrite;
     const result = await exec(unifiedStatusCommand());
     if (result.code !== 0 && !result.stdout) {
       snapshot = null;
@@ -705,15 +709,19 @@ async function refresh(showSuccessToast) {
     };
     renderOverview();
 
-    const config = parseProp(sections.config);
-    $("anonymous-memory").checked = config.anonymous_memory === "1";
-    $("exclude-unmount").checked = config.exclude_unmount !== "0";
-    savedExcluded = new Set(
-      (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),
-    );
-    excludedApps = new Set(savedExcluded);
-    if (!initialExcluded) {
-      initialExcluded = new Set(savedExcluded);
+    // A toggle queued while the status command ran is newer than what it read, so keep
+    // the UI state instead of overwriting it with the stale config.prop snapshot.
+    if (configWrite === writeBeforeRead) {
+      const config = parseProp(sections.config);
+      $("anonymous-memory").checked = config.anonymous_memory === "1";
+      $("exclude-unmount").checked = config.exclude_unmount !== "0";
+      savedExcluded = new Set(
+        (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),
+      );
+      excludedApps = new Set(savedExcluded);
+      if (!initialExcluded) {
+        initialExcluded = new Set(savedExcluded);
+      }
     }
 
     if (appsState !== "ready" || showSuccessToast) {
@@ -881,7 +889,7 @@ async function loadApps() {
       appIdGroups.get(appId).push(pkg);
     }
   });
-  installedPackages = new Set(appIdOf.size ? appIdOf.keys() : packages);
+  userPackages = new Set(packages);
 
   const labels = loadAppLabels(packages);
   userApps = packages.map((pkg) => ({
@@ -898,11 +906,17 @@ function groupOf(app) {
   return group && group.length ? group : [app.pkg];
 }
 
+// An app whose UID is shared with a system package cannot be excluded: the daemon excludes
+// a UID only when every package on it is listed, and system packages must never be listed.
+function isLocked(app) {
+  return groupOf(app).some((pkg) => !userPackages.has(pkg));
+}
+
 function excludedUserCount() {
   if (appsState !== "ready") {
     return excludedApps.size;
   }
-  return userApps.filter((app) => excludedApps.has(app.pkg)).length;
+  return userApps.filter((app) => excludedApps.has(app.pkg) && !isLocked(app)).length;
 }
 
 function isPending(pkg) {
@@ -932,7 +946,7 @@ function renderApps() {
 
   const query = $("app-search").value.trim().toLowerCase();
   const apps = userApps
-    .filter((app) => appFilter === "all" || excludedApps.has(app.pkg))
+    .filter((app) => appFilter === "all" || (excludedApps.has(app.pkg) && !isLocked(app)))
     .filter((app) => !query || app.pkg.toLowerCase().includes(query) || app.label.toLowerCase().includes(query))
     .sort((a, b) => (excludedApps.has(b.pkg) - excludedApps.has(a.pkg))
       || (a.label || a.pkg).localeCompare(b.label || b.pkg));
@@ -947,9 +961,16 @@ function renderApps() {
     const title = app.label || app.pkg;
     const initial = (title.replace(/^[^A-Za-z0-9\p{L}]+/u, "").charAt(0) || "?").toUpperCase();
     const shared = groupOf(app).length - 1;
+    const locked = isLocked(app);
+    let note = "";
+    if (locked) {
+      note = t("shared_uid_system");
+    } else if (shared > 0) {
+      note = t("shared_uid", { n: shared });
+    }
     return `
       <label class="toggle-row app-row">
-        <input type="checkbox" role="switch" data-pkg="${escapeHtml(app.pkg)}"${excludedApps.has(app.pkg) ? " checked" : ""}>
+        <input type="checkbox" role="switch" data-pkg="${escapeHtml(app.pkg)}"${excludedApps.has(app.pkg) && !locked ? " checked" : ""}${locked ? " disabled" : ""}>
         <span class="avatar" aria-hidden="true">${escapeHtml(initial)}</span>
         <span class="app-text">
           <span class="app-title">
@@ -957,7 +978,7 @@ function renderApps() {
             <span class="badge badge-warn" data-pending-for="${escapeHtml(app.pkg)}"${isPending(app.pkg) ? "" : " hidden"}>${escapeHtml(t("pending_restart"))}</span>
           </span>
           ${app.label ? `<span class="app-pkg">${escapeHtml(app.pkg)}</span>` : ""}
-          ${shared > 0 ? `<span class="app-note">${escapeHtml(t("shared_uid", { n: shared }))}</span>` : ""}
+          ${note ? `<span class="app-note">${escapeHtml(note)}</span>` : ""}
         </span>
         <span class="switch" aria-hidden="true"></span>
       </label>
@@ -969,11 +990,11 @@ function renderApps() {
 // from under the user's finger when the list re-sorts.
 function syncAppRows(packages) {
   packages.forEach((pkg) => {
-    const input = $("app-list").querySelector(`input[data-pkg="${pkg}"]`);
+    const input = $("app-list").querySelector(`input[data-pkg="${CSS.escape(pkg)}"]`);
     if (input) {
       input.checked = excludedApps.has(pkg);
     }
-    const badge = $("app-list").querySelector(`[data-pending-for="${pkg}"]`);
+    const badge = $("app-list").querySelector(`[data-pending-for="${CSS.escape(pkg)}"]`);
     if (badge) {
       badge.hidden = !isPending(pkg);
     }
@@ -983,6 +1004,9 @@ function syncAppRows(packages) {
 
 async function toggleApp(pkg, excluded) {
   const app = userApps.find((item) => item.pkg === pkg) || { pkg, appId: null };
+  if (isLocked(app)) {
+    return;
+  }
   const group = groupOf(app);
   group.forEach((member) => {
     if (excluded) {
@@ -997,7 +1021,7 @@ async function toggleApp(pkg, excluded) {
   let written = "";
   const result = await queueConfigWrite("exclude_apps", () => {
     written = [...excludedApps]
-      .filter((p) => installedPackages.has(p) && PACKAGE_RE.test(p))
+      .filter((p) => userPackages.has(p) && PACKAGE_RE.test(p))
       .sort()
       .join(",");
     return written;
