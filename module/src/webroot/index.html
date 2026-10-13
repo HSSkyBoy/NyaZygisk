@@ -1,109 +1,156 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F4F5F8">
-  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0F1115">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F1F2F4">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0E1013">
   <title>NyaZygisk</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main>
     <header class="header">
-      <h1 class="title">NyaZygisk</h1>
-      <label class="lang-picker">
-        <span class="sr-only" data-i18n="language_aria">Language</span>
-        <select id="lang-select" aria-label="Language">
-          <option value="en">EN</option>
-          <option value="zh-Hant">TC</option>
-          <option value="zh-Hans">SC</option>
-        </select>
-      </label>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 20V8l3-4 3 4h4l3-4 3 4v12z"/><path d="M9 13h.01"/><path d="M15 13h.01"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="title">NyaZygisk</h1>
+          <span class="subtitle mono" id="v-subtitle">-</span>
+        </div>
+      </div>
+      <button id="btn-reload" class="icon-button" type="button" data-i18n-aria="reload" aria-label="Reload">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      </button>
     </header>
 
-    <section class="card">
-      <h2 class="card-title" data-i18n="status">Status</h2>
-      <div class="status-row">
-        <span class="label" data-i18n="monitor">Zygote Monitor</span>
-        <span class="value" id="v-monitor">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" id="l-zygote" data-i18n="zygote">Zygote</span>
-        <span class="value" id="v-zygote">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" id="l-daemon" data-i18n="daemon">Daemon</span>
-        <span class="value" id="v-daemon">-</span>
-      </div>
-    </section>
+    <div id="view-overview" class="view">
+      <section id="hero" class="hero tone-neutral" aria-labelledby="hero-title">
+        <div class="hero-head">
+          <div class="hero-icon" aria-hidden="true">
+            <svg class="icon-ok" viewBox="0 0 24 24"><path d="M5 12l5 5L19 7"/></svg>
+            <svg class="icon-warn" viewBox="0 0 24 24"><path d="M12 7v6"/><path d="M12 17h.01"/></svg>
+            <svg class="icon-down" viewBox="0 0 24 24"><path d="M7 7l10 10"/><path d="M17 7L7 17"/></svg>
+            <svg class="icon-neutral" viewBox="0 0 24 24"><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14"/><path d="M12 17h.01"/></svg>
+          </div>
+          <div>
+            <h2 class="hero-title" id="hero-title">-</h2>
+            <span class="hero-sub" id="hero-sub"></span>
+          </div>
+        </div>
+        <div class="hero-rows">
+          <div class="status-row">
+            <span class="label" data-i18n="monitor">Zygote Monitor</span>
+            <span class="value" id="v-monitor">-</span>
+          </div>
+          <div class="status-row">
+            <span class="label" id="l-zygote" data-i18n="zygote">Zygote</span>
+            <span class="value" id="v-zygote">-</span>
+          </div>
+          <div class="status-row">
+            <span class="label" id="l-daemon" data-i18n="daemon">Daemon</span>
+            <span class="value" id="v-daemon">-</span>
+          </div>
+        </div>
+      </section>
 
-    <section class="card">
-      <h2 class="card-title" data-i18n="info">Basic Information</h2>
-      <div class="status-row">
-        <span class="label" data-i18n="version">Version</span>
-        <span class="value" id="v-version">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" data-i18n="root">Root</span>
-        <span class="value" id="v-root">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" data-i18n="kernel">Kernel</span>
-        <span class="value" id="v-kernel">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" data-i18n="sdk">Android SDK</span>
-        <span class="value" id="v-sdk">-</span>
-      </div>
-      <div class="status-row">
-        <span class="label" data-i18n="abi">ABI</span>
-        <span class="value" id="v-abi">-</span>
-      </div>
-    </section>
+      <section class="card" aria-labelledby="h-env">
+        <h2 class="card-title" id="h-env" data-i18n="info">Device &amp; environment</h2>
+        <div class="tiles">
+          <div class="tile wide">
+            <span class="tile-label" data-i18n="root">Root</span>
+            <span class="tile-value" id="v-root">-</span>
+          </div>
+          <div class="tile wide">
+            <span class="tile-label" data-i18n="kernel">Kernel</span>
+            <span class="tile-value mono" id="v-kernel">-</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label" data-i18n="sdk">Android SDK</span>
+            <span class="tile-value" id="v-sdk">-</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label" data-i18n="abi">ABI</span>
+            <span class="tile-value mono" id="v-abi">-</span>
+          </div>
+        </div>
+      </section>
 
-    <section class="card">
-      <div class="card-title-row">
-        <h2 class="card-title" data-i18n="modules">Active Modules</h2>
-        <span class="module-count" id="v-modules-count">0</span>
+      <section class="card" aria-labelledby="h-modules">
+        <div class="card-title-row">
+          <h2 class="card-title" id="h-modules" data-i18n="modules">Active modules</h2>
+          <span class="count" id="v-modules-count">0</span>
+        </div>
+        <div id="module-list" class="list"></div>
+      </section>
+
+      <section class="card" aria-labelledby="h-settings">
+        <h2 class="card-title" id="h-settings" data-i18n="settings">Settings</h2>
+        <label class="toggle-row" for="anonymous-memory">
+          <span class="toggle-text">
+            <span class="strong" data-i18n="anonymous_memory">Anonymous memory</span>
+            <span class="hint" data-i18n="anonymous_memory_hint">Hide module mappings after specialization</span>
+          </span>
+          <input id="anonymous-memory" type="checkbox" role="switch">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+        <div class="setting-row">
+          <span class="strong" id="lang-label" data-i18n="language">Language</span>
+          <div class="segmented" id="lang-select" role="group" aria-labelledby="lang-label">
+            <button type="button" data-lang="en">EN</button>
+            <button type="button" data-lang="zh-Hant">繁</button>
+            <button type="button" data-lang="zh-Hans">简</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="view-apps" class="view" hidden>
+      <header class="page-head">
+        <h2 class="page-title" data-i18n="app_exclude">App exclusion</h2>
+        <p class="hint" data-i18n="app_exclude_hint">Checked user apps load no Zygisk modules.</p>
+      </header>
+
+      <section class="card compact">
+        <label class="toggle-row" for="exclude-unmount">
+          <span class="toggle-text">
+            <span class="strong" data-i18n="exclude_unmount">Unmount for excluded apps</span>
+            <span class="hint" data-i18n="exclude_unmount_hint">Also hide module mounts, like the DenyList</span>
+          </span>
+          <input id="exclude-unmount" type="checkbox" role="switch">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </section>
+
+      <div class="app-tools">
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <span class="sr-only" data-i18n="search_apps">Search apps</span>
+          <input id="app-search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="search_apps" placeholder="Search apps">
+        </label>
+        <div class="segmented wide" id="app-filter" role="group">
+          <button type="button" data-filter="all"></button>
+          <button type="button" data-filter="excluded"></button>
+        </div>
       </div>
-      <div id="module-list" class="module-list empty" data-empty-key="none">None</div>
-    </section>
 
-    <section class="card">
-      <h2 class="card-title" data-i18n="settings">Settings</h2>
-      <label class="toggle-row" for="anonymous-memory">
-        <span>
-          <span class="label strong" data-i18n="anonymous_memory">Anonymous memory</span>
-          <span class="hint" data-i18n="anonymous_memory_hint">Hide module mappings after specialization</span>
-        </span>
-        <input id="anonymous-memory" type="checkbox" role="switch">
-        <span class="switch" aria-hidden="true"></span>
-      </label>
-    </section>
-
-    <section class="card">
-      <div class="card-title-row">
-        <h2 class="card-title" data-i18n="app_exclude">App exclusion</h2>
-        <span class="module-count" id="v-excluded-count">0</span>
-      </div>
-      <span class="hint" data-i18n="app_exclude_hint">Checked user apps load no Zygisk modules. System apps cannot be excluded. Takes effect the next time the app starts.</span>
-      <label class="toggle-row" for="exclude-unmount">
-        <span>
-          <span class="label strong" data-i18n="exclude_unmount">Unmount for excluded apps</span>
-          <span class="hint" data-i18n="exclude_unmount_hint">Also hide module mounts, like the DenyList</span>
-        </span>
-        <input id="exclude-unmount" type="checkbox" role="switch">
-        <span class="switch" aria-hidden="true"></span>
-      </label>
-      <input id="app-search" class="search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="search_apps" placeholder="Search packages">
-      <div id="app-list" class="module-list app-list empty">-</div>
-    </section>
-
-    <div class="actions">
-      <button id="btn-reload" type="button" data-i18n="reload">Reload</button>
+      <section class="card list-card" data-i18n-aria="user_apps" aria-label="User apps">
+        <div id="app-list" class="list"></div>
+      </section>
     </div>
   </main>
+
+  <nav class="tabbar" data-i18n-aria="tabs" aria-label="Tabs">
+    <button type="button" data-tab="overview">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      <span data-i18n="tab_overview">Overview</span>
+    </button>
+    <button type="button" data-tab="apps">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M14 17.5h7"/></svg>
+      <span><span data-i18n="app_exclude">App exclusion</span> · <span id="v-excluded-count">0</span></span>
+    </button>
+  </nav>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
