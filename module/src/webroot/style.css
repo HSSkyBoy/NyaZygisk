@@ -377,6 +377,41 @@ main {
   opacity: 0.55;
 }
 
+.search {
+  width: 100%;
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.app-row {
+  min-height: 44px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-row:last-child {
+  border-bottom: 0;
+}
+
+.app-row .module-name {
+  font-size: 14px;
+}
+
 .actions {
   display: flex;
   gap: 12px;

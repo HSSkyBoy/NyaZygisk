@@ -71,6 +71,8 @@ bitflags! {
         const PROCESS_GRANTED_ROOT = 1 << 0;
         /// The process is on the denylist and module mounts should be hidden.
         const PROCESS_ON_DENYLIST = 1 << 1;
+        /// The process is a user app on the exclusion list and must not load any module.
+        const PROCESS_EXCLUDED = 1 << 26;
         /// The process is the root manager application itself.
         const PROCESS_IS_MANAGER = 1 << 27;
         /// The active root solution is APatch.

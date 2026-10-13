@@ -38,6 +38,14 @@ const I18N = {
     bridge_missing: "No supported WebUI bridge detected",
     anonymous_memory: "Anonymous memory",
     anonymous_memory_hint: "Hide module mappings after specialization",
+    app_exclude: "App exclusion",
+    app_exclude_hint: "Checked user apps load no Zygisk modules. System apps cannot be excluded. Takes effect the next time the app starts.",
+    exclude_unmount: "Unmount for excluded apps",
+    exclude_unmount_hint: "Also hide module mounts, like the DenyList",
+    search_apps: "Search packages",
+    apps_loading: "Loading apps...",
+    apps_failed: "Failed to list apps",
+    apps_none: "No user apps",
   },
   "zh-Hant": {
     language_aria: "\u8a9e\u8a00",
@@ -72,6 +80,14 @@ const I18N = {
     bridge_missing: "\u627e\u4e0d\u5230\u652f\u63f4\u7684 WebUI bridge",
     anonymous_memory: "\u533f\u540d\u5167\u5b58",
     anonymous_memory_hint: "\u5728\u7279\u5316\u5f8c\u96b1\u85cf\u6a21\u7d44\u6620\u5c04",
+    app_exclude: "\u61c9\u7528\u6392\u9664",
+    app_exclude_hint: "\u52fe\u9078\u7684\u4f7f\u7528\u8005\u61c9\u7528\u4e0d\u6703\u8f09\u5165\u4efb\u4f55 Zygisk \u6a21\u7d44\uff0c\u7cfb\u7d71\u61c9\u7528\u7121\u6cd5\u88ab\u6392\u9664\u3002\u4e0b\u6b21\u555f\u52d5\u8a72\u61c9\u7528\u6642\u751f\u6548\u3002",
+    exclude_unmount: "\u5c0d\u6392\u9664\u7684\u61c9\u7528\u5378\u8f09\u639b\u8f09",
+    exclude_unmount_hint: "\u540c\u6642\u96b1\u85cf\u6a21\u7d44\u639b\u8f09\uff0c\u8207 DenyList \u76f8\u540c",
+    search_apps: "\u641c\u5c0b\u5957\u4ef6\u540d\u7a31",
+    apps_loading: "\u6b63\u5728\u8f09\u5165\u61c9\u7528\u2026",
+    apps_failed: "\u7121\u6cd5\u53d6\u5f97\u61c9\u7528\u6e05\u55ae",
+    apps_none: "\u6c92\u6709\u4f7f\u7528\u8005\u61c9\u7528",
   },
   "zh-Hans": {
     language_aria: "\u8bed\u8a00",
@@ -106,11 +122,24 @@ const I18N = {
     bridge_missing: "\u627e\u4e0d\u5230\u652f\u6301\u7684 WebUI bridge",
     anonymous_memory: "\u533f\u540d\u5185\u5b58",
     anonymous_memory_hint: "\u5728\u7279\u5316\u540e\u9690\u85cf\u6a21\u5757\u6620\u5c04",
+    app_exclude: "\u5e94\u7528\u6392\u9664",
+    app_exclude_hint: "\u52fe\u9009\u7684\u7528\u6237\u5e94\u7528\u4e0d\u4f1a\u52a0\u8f7d\u4efb\u4f55 Zygisk \u6a21\u5757\uff0c\u7cfb\u7edf\u5e94\u7528\u65e0\u6cd5\u88ab\u6392\u9664\u3002\u4e0b\u6b21\u542f\u52a8\u8be5\u5e94\u7528\u65f6\u751f\u6548\u3002",
+    exclude_unmount: "\u5bf9\u6392\u9664\u7684\u5e94\u7528\u5378\u8f7d\u6302\u8f7d",
+    exclude_unmount_hint: "\u540c\u65f6\u9690\u85cf\u6a21\u5757\u6302\u8f7d\uff0c\u4e0e DenyList \u76f8\u540c",
+    search_apps: "\u641c\u7d22\u5305\u540d",
+    apps_loading: "\u6b63\u5728\u52a0\u8f7d\u5e94\u7528\u2026",
+    apps_failed: "\u65e0\u6cd5\u83b7\u53d6\u5e94\u7528\u5217\u8868",
+    apps_none: "\u6ca1\u6709\u7528\u6237\u5e94\u7528",
   },
 };
 
+const PACKAGE_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$/;
+
 let currentLang = pickInitialLanguage();
 let toastTimer = null;
+let userApps = [];
+let excludedApps = new Set();
+let appsLoaded = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -127,6 +156,18 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("anonymous-memory").addEventListener("change", (event) => {
     saveAnonymousMemory(event.target.checked);
+  });
+  $("exclude-unmount").addEventListener("change", (event) => {
+    saveExcludeUnmount(event.target.checked);
+  });
+  $("app-search").addEventListener("input", () => {
+    renderApps();
+  });
+  $("app-list").addEventListener("change", (event) => {
+    const input = event.target;
+    if (input && input.dataset && input.dataset.pkg) {
+      saveExcludedApp(input, input.dataset.pkg, input.checked);
+    }
   });
 
   applyTranslations();
@@ -157,6 +198,10 @@ function applyTranslations() {
     const key = element.getAttribute("data-i18n");
     element.textContent = t(key);
   });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+    element.placeholder = t(element.getAttribute("data-i18n-placeholder"));
+  });
+  renderApps();
 
   const emptyKey = $("module-list").dataset.emptyKey;
   if ($("module-list").classList.contains("empty")) {
@@ -522,6 +567,16 @@ async function refresh(showSuccessToast) {
   const configData = parseProp(sections.config);
   $("anonymous-memory").checked = configData.anonymous_memory === "1";
 
+  excludedApps = new Set(
+    (configData.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),
+  );
+  $("exclude-unmount").checked = configData.exclude_unmount !== "0";
+  if (!appsLoaded || showSuccessToast) {
+    loadApps();
+  } else {
+    renderApps();
+  }
+
   if (showSuccessToast) {
     showToast("reloaded");
   }
@@ -551,6 +606,111 @@ async function saveAnonymousMemory(enabled) {
     return;
   }
   showToast("saved");
+}
+
+// Writes one key of config.prop atomically, keeping every other key. Callers must pass a
+// value made only of [A-Za-z0-9_.,] so it can sit inside single quotes.
+function setConfigValue(key, value) {
+  const exec = window.NeoZygiskWebUi && window.NeoZygiskWebUi.exec;
+  if (typeof exec !== "function" || !/^[A-Za-z0-9_.,]*$/.test(value)) {
+    return Promise.resolve({ code: 1 });
+  }
+  return exec(
+    `mkdir -p ${CONFIG_DIR} && ` +
+    `{ if [ -f ${CONFIG_PATH} ]; then grep -v '^${key}=' ${CONFIG_PATH}; fi; ` +
+    `printf '${key}=${value}\\n'; } > ${CONFIG_PATH}.tmp && ` +
+    `mv ${CONFIG_PATH}.tmp ${CONFIG_PATH} && chmod 0644 ${CONFIG_PATH}`,
+  );
+}
+
+async function saveExcludeUnmount(enabled) {
+  $("exclude-unmount").disabled = true;
+  const result = await setConfigValue("exclude_unmount", enabled ? "1" : "0");
+  $("exclude-unmount").disabled = false;
+
+  if (result.code !== 0) {
+    $("exclude-unmount").checked = !enabled;
+    showToast("save_failed", true);
+    return;
+  }
+  showToast("saved");
+}
+
+async function saveExcludedApp(input, pkg, excluded) {
+  const next = new Set(excludedApps);
+  if (excluded) {
+    next.add(pkg);
+  } else {
+    next.delete(pkg);
+  }
+  // Drop packages that are no longer installed so the list never holds invisible entries.
+  const installed = new Set(userApps);
+  const value = [...next].filter((p) => installed.has(p) && PACKAGE_RE.test(p)).sort().join(",");
+
+  input.disabled = true;
+  const result = await setConfigValue("exclude_apps", value);
+  input.disabled = false;
+
+  if (result.code !== 0) {
+    input.checked = !excluded;
+    showToast("save_failed", true);
+    return;
+  }
+  excludedApps = new Set(value ? value.split(",") : []);
+  $("v-excluded-count").textContent = String(excludedApps.size);
+  showToast("saved");
+}
+
+async function loadApps() {
+  const exec = window.NeoZygiskWebUi && window.NeoZygiskWebUi.exec;
+  if (typeof exec !== "function") {
+    return;
+  }
+
+  const result = await exec("pm list packages -3 2>/dev/null");
+  if (result.code !== 0 && !result.stdout) {
+    showToast("apps_failed", true);
+    return;
+  }
+
+  userApps = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^package:/, ""))
+    .filter((pkg) => PACKAGE_RE.test(pkg))
+    .sort();
+  appsLoaded = true;
+  renderApps();
+}
+
+function renderApps() {
+  const list = $("app-list");
+  $("v-excluded-count").textContent = String(excludedApps.size);
+
+  if (!appsLoaded) {
+    list.className = "module-list app-list empty";
+    list.textContent = t("apps_loading");
+    return;
+  }
+
+  const query = $("app-search").value.trim().toLowerCase();
+  const apps = userApps
+    .filter((pkg) => !query || pkg.toLowerCase().includes(query))
+    .sort((a, b) => (excludedApps.has(b) - excludedApps.has(a)) || a.localeCompare(b));
+
+  if (!apps.length) {
+    list.className = "module-list app-list empty";
+    list.textContent = t("apps_none");
+    return;
+  }
+
+  list.className = "module-list app-list";
+  list.innerHTML = apps.map((pkg) => `
+    <label class="toggle-row app-row">
+      <span class="module-name">${escapeHtml(pkg)}</span>
+      <input type="checkbox" role="switch" data-pkg="${escapeHtml(pkg)}"${excludedApps.has(pkg) ? " checked" : ""}>
+      <span class="switch" aria-hidden="true"></span>
+    </label>
+  `).join("");
 }
 
 function renderFailure(stderr) {

@@ -10,6 +10,7 @@
 //!   and managing companion processes.
 
 use crate::constants::{self, DaemonSocketAction, ProcessFlags, ZKSU_VERSION};
+use crate::exclude;
 use crate::mount::{MountNamespace, MountNamespaceManager};
 use crate::utils::{self, UnixStreamExt};
 use crate::{lp_select, root_impl};
@@ -93,6 +94,7 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
         zn_companions: Mutex::new(HashMap::new()),
     });
     let listener = create_daemon_socket()?;
+    spawn_config_watcher();
 
     info!("Daemon listening on {}", DAEMON_SOCKET_PATH.get().unwrap());
 
@@ -470,8 +472,6 @@ fn spawn_companion(name: &str, lib_fd: RawFd) -> Result<Option<UnixStream>> {
 
 fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
     let uid = stream.read_u32()? as i32;
-    let mut flags = ProcessFlags::empty();
-
 
     // Legitimate callers ask this while still running as zygote/root, before dropping
     // privileges to `uid`. An already-specialized app connecting directly to this
@@ -483,6 +483,8 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
         return Ok(());
     }
 
+    let mut flags = ProcessFlags::empty();
+
     if root_impl::uid_is_manager(uid) {
         flags |= ProcessFlags::PROCESS_IS_MANAGER;
     } else {
@@ -491,6 +493,12 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
         }
         if root_impl::uid_should_umount(uid) {
             flags |= ProcessFlags::PROCESS_ON_DENYLIST;
+        }
+        if let Some(unmount) = u32::try_from(uid).ok().and_then(exclude::lookup) {
+            flags |= ProcessFlags::PROCESS_EXCLUDED;
+            if unmount {
+                flags |= ProcessFlags::PROCESS_ON_DENYLIST;
+            }
         }
     }
 
@@ -511,14 +519,6 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
 
 fn handle_update_mount_namespace(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
     let namespace_type = MountNamespace::try_from(stream.read_u8()?)?;
-    if let Some(fd) = context.mount_manager.get_namespace_fd(namespace_type) {
-        // Namespace is already cached, send the FD to the client.
-        // SUCCESS: Send Status '1', then the FD.
-        stream.write_u8(1)?;
-        stream.send_fd(fd)?;
-    } else {
-        // FAILURE: Send Status '0'. 
-        // Do NOT send an FD or random u32 bytes, just stop here.
 
     // Only the zygote/root context, mid-specialize, legitimately needs to setns()
     // into the cached namespaces (setns itself would fail without CAP_SYS_ADMIN for
@@ -530,6 +530,14 @@ fn handle_update_mount_namespace(stream: &mut UnixStream, context: &AppContext) 
         return Ok(());
     }
 
+    if let Some(fd) = context.mount_manager.get_namespace_fd(namespace_type) {
+        // Namespace is already cached, send the FD to the client.
+        // SUCCESS: Send Status '1', then the FD.
+        stream.write_u8(1)?;
+        stream.send_fd(fd)?;
+    } else {
+        // FAILURE: Send Status '0'. 
+        // Do NOT send an FD or random u32 bytes, just stop here.
         warn!("Namespace {:?} is not cached yet.", namespace_type);
         stream.write_u8(0)?;
     }
@@ -904,6 +912,47 @@ fn initialize_shared_memory() -> Result<()> {
         })?;
 
     Ok(())
+}
+
+/// Drops every cached entry so the next `GetProcessFlags` of each uid reaches the daemon.
+fn invalidate_process_flag_cache() {
+    if let Some(shm) = SHARED_MEMORY.get() {
+        let _guard = shm.write_lock.lock().unwrap();
+        let layout = shm.layout();
+        let base_version = layout.version.load(Ordering::Relaxed);
+        layout
+            .version
+            .store(base_version.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::Release);
+
+        for entry in layout.entries.iter() {
+            entry.uid.store(u32::MAX, Ordering::Relaxed);
+            entry.flags.store(0, Ordering::Relaxed);
+        }
+
+        layout
+            .version
+            .store(base_version.wrapping_add(2), Ordering::Release);
+    }
+}
+
+/// Flushes the flag cache whenever the WebUI rewrites `config.prop`; otherwise a cached
+/// answer would keep serving the old exclusion list until the daemon restarts.
+fn spawn_config_watcher() {
+    thread::spawn(|| {
+        let mut last = exclude::config_mtime();
+        loop {
+            thread::sleep(std::time::Duration::from_secs(1));
+            let current = exclude::config_mtime();
+            if current != last {
+                last = current;
+                // Re-read first so a miss right after the flush sees the new list.
+                exclude::refresh();
+                invalidate_process_flag_cache();
+                debug!("config.prop changed, process flag cache flushed");
+            }
+        }
+    });
 }
 
 fn cache_process_flags(uid: u32, flags: u32) {

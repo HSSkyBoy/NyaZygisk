@@ -82,6 +82,24 @@
       </label>
     </section>
 
+    <section class="card">
+      <div class="card-title-row">
+        <h2 class="card-title" data-i18n="app_exclude">App exclusion</h2>
+        <span class="module-count" id="v-excluded-count">0</span>
+      </div>
+      <span class="hint" data-i18n="app_exclude_hint">Checked user apps load no Zygisk modules. System apps cannot be excluded. Takes effect the next time the app starts.</span>
+      <label class="toggle-row" for="exclude-unmount">
+        <span>
+          <span class="label strong" data-i18n="exclude_unmount">Unmount for excluded apps</span>
+          <span class="hint" data-i18n="exclude_unmount_hint">Also hide module mounts, like the DenyList</span>
+        </span>
+        <input id="exclude-unmount" type="checkbox" role="switch">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+      <input id="app-search" class="search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="search_apps" placeholder="Search packages">
+      <div id="app-list" class="module-list app-list empty">-</div>
+    </section>
+
     <div class="actions">
       <button id="btn-reload" type="button" data-i18n="reload">Reload</button>
     </div>

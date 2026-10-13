@@ -421,8 +421,15 @@ void ZygiskContext::app_specialize_pre() {
         flags |= DO_REVERT_UNMOUNT;
     }
 
+    // User apps picked in the WebUI never load any module. The daemon only ever sets this
+    // flag for regular app uids, so system_server and system apps are not affected.
+    bool excluded = (info_flags & PROCESS_EXCLUDED) == PROCESS_EXCLUDED;
+    if (excluded) {
+        LOGV("[%s] is on the exclusion list, skip loading modules", process);
+    }
+
     flags |= APP_SPECIALIZE;
-    if (!skip_zygiskd) run_modules_pre();
+    if (!skip_zygiskd && !excluded) run_modules_pre();
 }
 
 void ZygiskContext::app_specialize_post() {
