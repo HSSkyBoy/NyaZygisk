@@ -20,6 +20,7 @@ const I18N = {
     zygote: "Zygote",
     daemon: "Daemon",
     root: "Root",
+    rom: "System",
     kernel: "Kernel",
     sdk: "Android SDK",
     abi: "ABI",
@@ -77,6 +78,7 @@ const I18N = {
     zygote: "Zygote",
     daemon: "守護程序",
     root: "Root 方案",
+    rom: "系統",
     kernel: "核心",
     sdk: "Android SDK",
     abi: "ABI",
@@ -134,6 +136,7 @@ const I18N = {
     zygote: "Zygote",
     daemon: "守护进程",
     root: "Root 方案",
+    rom: "系统",
     kernel: "内核",
     sdk: "Android SDK",
     abi: "ABI",
@@ -436,6 +439,27 @@ function formatRootInfo(rootData, fallback) {
   return version ? `${name} ${version}` : name;
 }
 
+// Vendor skins report their version through their own properties; show whichever is set.
+function formatRomInfo(rom) {
+  const oplus = rom["ro.build.version.oplusrom.display"] || rom["ro.build.version.oplusrom"];
+  if (oplus) {
+    return /[a-z]{2,}/i.test(oplus) ? oplus : `ColorOS / OxygenOS ${oplus.replace(/^V/i, "")}`;
+  }
+  const hyperos = rom["ro.mi.os.version.name"];
+  if (hyperos) {
+    return `HyperOS ${hyperos.replace(/^OS/i, "")}`;
+  }
+  const miui = rom["ro.miui.ui.version.name"];
+  if (miui) {
+    return `MIUI ${miui.replace(/^V/i, "")}`;
+  }
+  const oneui = Number(rom["ro.build.version.oneui"]);
+  if (oneui > 0) {
+    return `One UI ${Math.floor(oneui / 10000)}.${Math.floor(oneui / 100) % 100}`;
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Modules
 
@@ -594,6 +618,7 @@ function parseSectionOutput(stdout) {
   return {
     prop: decodeBase64Utf8(sections.PROP || ""),
     root: decodeBase64Utf8(sections.ROOT || ""),
+    rom: decodeBase64Utf8(sections.ROM || ""),
     config: decodeBase64Utf8(sections.CONFIG || ""),
     modules: decodeBase64Utf8(sections.MODULES || ""),
   };
@@ -628,6 +653,13 @@ function unifiedStatusCommand() {
     '        [ -n "$v" ] && echo "version_text=$v"',
     '      fi',
     '    fi',
+    '  } | base64',
+    '  echo "---ROM---"',
+    '  {',
+    '    for p in ro.build.version.oplusrom.display ro.build.version.oplusrom ro.mi.os.version.name ro.miui.ui.version.name ro.build.version.oneui; do',
+    '      v=$(getprop "$p")',
+    '      [ -n "$v" ] && echo "$p=$v"',
+    '    done',
     '  } | base64',
     '  echo "---CONFIG---"',
     `  base64 < ${CONFIG_PATH} 2>/dev/null`,
@@ -705,6 +737,7 @@ async function refresh(showSuccessToast) {
     snapshot = {
       data,
       root: parseProp(sections.root),
+      rom: parseProp(sections.rom),
       modules: mergeModules(parseModuleScan(sections.modules), parseDaemonModules(data)),
     };
     renderOverview();
@@ -743,10 +776,13 @@ function renderOverview() {
     renderFailure();
     return;
   }
-  const { data, root, modules } = snapshot;
+  const { data, root, rom, modules } = snapshot;
 
   const rootText = formatRootInfo(root, data.root_implementation);
   $("v-root").textContent = rootText;
+  const romText = formatRomInfo(rom);
+  $("v-rom").textContent = romText || "-";
+  $("t-rom").hidden = !romText;
   $("v-kernel").textContent = data.device_kernel || "-";
   $("v-sdk").textContent = data.device_sdk || "-";
   $("v-abi").textContent = data.device_abi || "-";

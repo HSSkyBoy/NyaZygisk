@@ -354,6 +354,10 @@ svg {
   grid-column: span 2;
 }
 
+.tile[hidden] {
+  display: none;
+}
+
 .tile-label {
   font-size: 12px;
   color: var(--muted);
