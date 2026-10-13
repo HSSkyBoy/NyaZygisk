@@ -360,13 +360,24 @@ uintptr_t ElfImage::runtimeLookup(const char* name, size_t* size) const {
     }
     if (!symtab || !strtab || strsz == 0) return 0;
 
-    // Bound the scan to the memory between the symtab and the strtab (the
-    // dynsym precedes the dynstr in every standard layout); this keeps the
-    // scan inside mapped pages without needing the symbol count.
-    const char* sym_end = reinterpret_cast<const char*>(symtab);
-    size_t max_syms = strtab > sym_end ? static_cast<size_t>(strtab - sym_end) / sizeof(ElfW(Sym))
-                                       : 0;
-    if (max_syms == 0 || max_syms > (1u << 20)) max_syms = 1u << 20;
+    // Bound the scan to the mapping that holds the symtab, and further to the
+    // strtab when it follows (the dynsym precedes the dynstr in every standard
+    // layout). A fixed cap could walk past the mapping into unmapped memory.
+    const uintptr_t symtab_address = reinterpret_cast<uintptr_t>(symtab);
+    size_t max_syms = 0;
+    for (const auto& map : parseMaps("self")) {
+        if (symtab_address >= map.start && symtab_address < map.end) {
+            max_syms = static_cast<size_t>(map.end - symtab_address) / sizeof(ElfW(Sym));
+            break;
+        }
+    }
+    const uintptr_t strtab_address = reinterpret_cast<uintptr_t>(strtab);
+    if (strtab_address > symtab_address) {
+        const size_t distance =
+            static_cast<size_t>(strtab_address - symtab_address) / sizeof(ElfW(Sym));
+        if (distance < max_syms) max_syms = distance;
+    }
+    if (max_syms == 0) return 0;
 
     for (size_t i = 1; i < max_syms; ++i) {
         const ElfW(Sym)& s = symtab[i];

@@ -46,8 +46,8 @@ int api_pltHook(void* base, const char* symbol, void* hook, void** original) {
     auto maps = parseMaps("self");
     const MapEntry* target_entry = nullptr;
     for (const auto& m : maps) {
-        uintptr_t load_base = m.start - m.offset;
-        if ((b >= m.start && b < m.end) || b == m.start || b == load_base) {
+        bool is_load_base = m.start >= m.offset && b == m.start - m.offset;
+        if ((b >= m.start && b < m.end) || is_load_base) {
             if (m.inode == 0) continue;
             for (const auto& h : maps) {
                 if (h.inode == m.inode && h.dev == m.dev && h.offset == 0) {
@@ -88,7 +88,7 @@ int api_inlineHook(void* target, void* addr, void** original) {
     const uintptr_t t = reinterpret_cast<uintptr_t>(target);
     {
         std::lock_guard<std::mutex> lk(g_hook_mutex);
-        if (g_hooked.count(t)) {
+        if (!g_hooked.insert(t).second) {
             LOGW("ZN inlineHook %p already hooked", target);
             return ZN_FAILED;
         }
@@ -97,11 +97,10 @@ int api_inlineHook(void* target, void* addr, void** original) {
     if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(addr),
                   reinterpret_cast<dobby_dummy_func_t*>(original)) != RS_SUCCESS) {
         LOGE("ZN inlineHook %p: DobbyHook failed", target);
+        std::lock_guard<std::mutex> lk(g_hook_mutex);
+        g_hooked.erase(t);
         return ZN_FAILED;
     }
-
-    std::lock_guard<std::mutex> lk(g_hook_mutex);
-    g_hooked.insert(t);
     return ZN_SUCCESS;
 }
 
@@ -109,6 +108,10 @@ int api_inlineUnhook(void* target) {
     if (!target) return ZN_FAILED;
 
     const uintptr_t t = reinterpret_cast<uintptr_t>(target);
+    {
+        std::lock_guard<std::mutex> lk(g_hook_mutex);
+        if (g_hooked.find(t) == g_hooked.end()) return ZN_FAILED;
+    }
     if (DobbyDestroy(target) != RS_SUCCESS) return ZN_FAILED;
 
     std::lock_guard<std::mutex> lk(g_hook_mutex);
