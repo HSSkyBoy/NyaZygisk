@@ -159,6 +159,25 @@ impl UnixStreamExt for UnixStream {
     }
 }
 
+/// Returns the real uid of the process on the other end of a connected Unix domain
+/// socket, as reported by the kernel (`SO_PEERCRED`), or `None` if it could not be
+/// determined. Unlike any uid a client sends as part of its request payload, this
+/// cannot be spoofed by the client.
+pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (ret == 0).then_some(cred.uid)
+}
+
 /// Creates a `UnixListener` bound to a given path, handling file cleanup and SELinux contexts.
 pub fn unix_listener_from_path(path: &str) -> Result<UnixListener> {
     let _ = fs::remove_file(path);

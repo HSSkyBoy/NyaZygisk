@@ -119,12 +119,20 @@ fn handle_connection(mut stream: UnixStream, context: Arc<AppContext>) -> Result
         // These actions are lightweight and handled synchronously.
         DaemonSocketAction::CacheMountNamespace => {
             let pid = stream.read_u32()? as i32;
-            context
-                .mount_manager
-                .save_mount_namespace(pid, MountNamespace::Clean)?;
-            context
-                .mount_manager
-                .save_mount_namespace(pid, MountNamespace::Root)?;
+            // Only the zygote/root context legitimately calls this, for its own pid,
+            // before dropping privileges to the forked child's app uid. Reject anyone
+            // else so an already-specialized process can't poison another pid's cached
+            // mount namespace entry.
+            if utils::peer_uid(&stream) != Some(0) {
+                warn!("CacheMountNamespace: rejecting request from non-root peer for pid {}", pid);
+            } else {
+                context
+                    .mount_manager
+                    .save_mount_namespace(pid, MountNamespace::Clean)?;
+                context
+                    .mount_manager
+                    .save_mount_namespace(pid, MountNamespace::Root)?;
+            }
         }
         DaemonSocketAction::PingHeartbeat => {
             let value = constants::ZYGOTE_INJECTED;
@@ -464,6 +472,17 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
     let uid = stream.read_u32()? as i32;
     let mut flags = ProcessFlags::empty();
 
+
+    // Legitimate callers ask this while still running as zygote/root, before dropping
+    // privileges to `uid`. An already-specialized app connecting directly to this
+    // socket would otherwise be able to probe any other uid's root-grant/denylist
+    // state, so it gets an empty, uncached answer instead.
+    if utils::peer_uid(stream) != Some(0) {
+        warn!("GetProcessFlags: rejecting request from non-root peer for uid {}", uid);
+        stream.write_u32(0)?;
+        return Ok(());
+    }
+
     if root_impl::uid_is_manager(uid) {
         flags |= ProcessFlags::PROCESS_IS_MANAGER;
     } else {
@@ -500,6 +519,17 @@ fn handle_update_mount_namespace(stream: &mut UnixStream, context: &AppContext) 
     } else {
         // FAILURE: Send Status '0'. 
         // Do NOT send an FD or random u32 bytes, just stop here.
+
+    // Only the zygote/root context, mid-specialize, legitimately needs to setns()
+    // into the cached namespaces (setns itself would fail without CAP_SYS_ADMIN for
+    // anyone else), but there's no reason to hand the fd out at all to a peer that
+    // isn't root.
+    if utils::peer_uid(stream) != Some(0) {
+        warn!("UpdateMountNamespace: rejecting request from non-root peer");
+        stream.write_u8(0)?;
+        return Ok(());
+    }
+
         warn!("Namespace {:?} is not cached yet.", namespace_type);
         stream.write_u8(0)?;
     }
