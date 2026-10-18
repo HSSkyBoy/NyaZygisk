@@ -1,58 +1,149 @@
 # NyaZygisk
 
-NyaZygisk is a Zygote and process injection framework, implemented via [`ptrace`](https://man7.org/linux/man-pages/man2/ptrace.2.html), that provides both **Magisk Zygisk API** and **Zygisk Next (ZN) API** support for APatch, KernelSU, and Magisk.
-It also functions as a powerful, feature-rich replacement for Magisk's built-in Zygisk.
+NyaZygisk is an open-source Zygote injection framework implemented via [`ptrace`](https://man7.org/linux/man-pages/man2/ptrace.2.html) for APatch, KernelSU, and Magisk.
+It loads both **Magisk Zygisk API** modules and **Zygisk Next (ZN) API** modules from a single implementation, and can replace Magisk's built-in Zygisk.
 
-This project is a fork of [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk), extended with dual-engine module loading and Zygisk Next API compatibility.
+NyaZygisk is a fork of [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk), extended with Zygisk Next API compatibility, additional trace hiding, and broader platform support.
 
-## Core Principles
+## Why NyaZygisk
 
-NyaZygisk is engineered with key objectives:
+There are two distinct module APIs in the Zygisk ecosystem:
 
-1.  **Dual API Compatibility:** 
-    * **Magisk Zygisk API:** Full compatibility with [Magisk's built-in Zygisk](https://github.com/topjohnwu/Magisk/tree/master/native/src/core/zygisk) modules (`zygisk_module_entry`).
-    * **Zygisk Next API:** Full compatibility with Zygisk Next (ZN) API (v1 ~ v4) modules (`zn_modules.txt`), providing `inlineHook` ([Dobby](https://github.com/LSPosed/Dobby)), `pltHook` ([LSPlt](https://github.com/LSPosed/LSPlt)), comprehensive ELF symbol resolution with `.gnu_debugdata` LZMA decompression, and companion process management.
-2.  **Minimalist Design:** Focuses on a lean and efficient implementation of the injection and module loading engines, avoiding feature bloat to ensure stability and performance.
-3.  **Trace Cleaning:** Guarantees the complete removal of its injection traces from application processes once all Zygisk modules are unloaded.
-4.  **Advanced Stealth:** Employs a sophisticated DenyList to provide granular control over root and module visibility, effectively hiding the traces of your root solution.
-5.  **Modern WebUI Integration:** Built-in WebUI dashboard providing real-time status monitoring, distinguishing active modules by type (`[Zygisk]` / `[Next]`), and displaying target process bindings.
+* **Magisk Zygisk API** (`zygisk_module_entry`): used by most Zygisk modules, such as LSPosed.
+* **Zygisk Next API** (`zn_module`, declared in `zn_modules.txt`): introduced by Zygisk Next after it went closed-source, offering inline / PLT hooking and HyperOS Rust Runtime callbacks.
+
+Before NyaZygisk, running both kinds of modules with open-source software meant stacking two modules: a Zygisk implementation (NeoZygisk or ReZygisk) plus a separate ZN loader (ZygiskNextNext). NyaZygisk does both in one GPL-3.0 module.
+
+| | Zygisk Next | **NyaZygisk** | NeoZygisk | ReZygisk | ZygiskNextNext |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| License | Closed source | **GPL-3.0** | GPL-3.0 | AGPL-3.0 | GPL-3.0 |
+| Magisk Zygisk API | ✅ | ✅ v5 | ✅ v5 | ✅ v5 | ❌ |
+| Zygisk Next API | ✅ | ✅ v4 | ❌ | ❌ | ✅ v4 |
+| HyperOS Runtime API | ✅ | ✅ v1 | ❌ | ❌ | ✅ |
+| Both APIs in one module | ✅ | ✅ | ❌ | ❌ | ❌ |
+
+A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https://www.nkbe.top/posts/zygisk-implementations-compare/).
+
+## Features
+
+### Dual API support
+
+* **Magisk Zygisk API v5:** full compatibility with modules built for [Magisk's built-in Zygisk](https://github.com/topjohnwu/Magisk/tree/master/native/src/core/zygisk).
+* **Zygisk Next API v4:** loads modules declared in `zn_modules.txt`, providing:
+  * `inlineHook` via [Dobby](https://github.com/LSPosed/Dobby) and `pltHook` via [LSPlt](https://github.com/LSPosed/LSPlt);
+  * ELF symbol resolution, including `.gnu_debugdata` LZMA decompression for stripped system libraries;
+  * companion processes hosted by the root daemon (`zygiskd`).
+* **HyperOS Runtime API v1:** application callbacks for modules targeting Xiaomi's `hyos_spawner`.
+
+### DenyList and trace hiding
+
+* Clean mount namespaces for apps on the DenyList (see [The DenyList Explained](#the-denylist-explained)).
+* Complete removal of injection traces once all Zygisk modules are unloaded, including traces left by the unloading itself.
+* Memory map spoofing and CFI shadow handling.
+* FD-tracked `TracerPid` sanitization.
+* System property spoofing via `spoof.prop` (see [Property Spoofing](#property-spoofing)).
+
+### Platform support
+
+* APatch, KernelSU, and Magisk.
+* KernelSU LKM late-load mode and KernelSU emulated soft reboot (temporary root).
+* HyperOS `hyos_spawner` runtime injection.
+* Android 17 Zygote signatures, including GrapheneOS.
+* BTI-enabled devices.
+
+### WebUI
+
+* Real-time status of the daemons and injection.
+* Active modules labelled by type (`[Zygisk]` / `[Next]`) with their target process bindings.
+* Per-app module exclusion list for user apps.
+* Device information, including the vendor ROM version.
+
+## Requirements
+
+| Item | Requirement |
+| :--- | :--- |
+| Android | 7.1 (API 25) or newer |
+| Architecture | `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` |
+| APatch | 10762 or newer |
+| KernelSU | kernel 10940 or newer, ksud 11425 or newer |
+| Magisk | 26402 or newer, with built-in Zygisk **disabled** |
+
+Install only one Zygisk implementation at a time. NyaZygisk replaces NeoZygisk, ReZygisk, and Zygisk Next; do not install it alongside them.
+
+## Installation
+
+1. Download the latest release from [GitHub Releases](https://github.com/HSSkyBoy/NyaZygisk/releases).
+2. Install the zip from your root manager (APatch, KernelSU, or Magisk).
+3. Reboot.
+4. Check the module description or open the WebUI to confirm the daemons are running.
+
+Use the `release` build for daily use. The `debug` build has verbose logging and should only be used to collect logs for bug reports.
+
+
+## Official Channel
+Telegram: [@NyaZygisk](t.me/NYAZYGISK)
+
+
+## Known Limitations
+
+* **ZN module injection targets:** Zygisk Next and ZygiskNextNext can inject ZN modules into any init-spawned process declared with `path=` / `name=` in `zn_modules.txt`. NyaZygisk currently intercepts only Zygote and `hyos_spawner`, so ZN modules targeting other system daemons will not be loaded.
+* **Architectures:** `riscv64` is not supported.
 
 ## The DenyList Explained
 
-Modern systemless root solutions operate by creating overlay filesystems using [`mount`](https://man7.org/linux/man-pages/man8/mount.8.html) rather than directly modifying system partitions. The DenyList is a core feature designed to hide these modifications by precisely controlling the [mount namespaces](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html) for each application process.
+Modern systemless root solutions operate by creating overlay filesystems using [`mount`](https://man7.org/linux/man-pages/man8/mount.8.html) rather than directly modifying system partitions. The DenyList hides these modifications by controlling the [mount namespace](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html) of each application process.
 
-Here is how NyaZygisk manages visibility for different application states:
-
-| Application State | Mount Namespace Visibility | Description & Use Case |
+| Application State | Mount Namespace Visibility | Use Case |
 | :--- | :--- | :--- |
-| **Granted Root Privileges** | Root Solution Mounts + Module Mounts | For trusted applications that require full root access to function correctly (e.g., advanced file managers). |
-| **On DenyList** | Clean, Unmodified Mount Namespace | Provides a pristine environment for applications that perform root detection. The app's root privileges might be revoked, and all traces of root and module mounts are hidden. |
+| **Granted Root Privileges** | Root solution mounts + module mounts | Trusted apps that require root access (e.g., advanced file managers). |
+| **On DenyList** | Clean, unmodified mount namespace | Apps that perform root detection. Root and module mounts are hidden. |
 
-To achieve a clean mount namespace for applications on the DenyList, NyaZygisk employs two distinct strategies: a primary, aggressive approach and a reliable fallback.
+NyaZygisk uses two strategies to provide a clean mount namespace:
 
-1.  **Direct Zygote Unmounting (Primary Strategy)**
-    As an experimental feature for bypassing advanced detection, NyaZygisk attempts to unmount all root-related traces directly from the zygote process itself. This cleans the environment *before* an application process is fully specialized, offering a potentially more robust hiding mechanism. To ensure system stability, this operation is only performed after a strict safety check. If a module is providing critical system resources (e.g., an overlay in `/product`), this direct unmount is aborted to prevent a zygote crash.
+1. **Direct Zygote unmounting (primary):**
+   NyaZygisk unmounts root-related traces from the Zygote process itself, so the environment is clean *before* the app process is specialized. This only runs after a safety check: if a module provides critical system resources (e.g., an overlay in `/product`), the unmount is aborted to avoid crashing Zygote.
 
-2.  **Namespace Switching (Fallback Strategy)**
-    If the direct unmount strategy is aborted for safety, or if any traces failed to unmount, NyaZygisk reverts to its standard, reliable method. After an app process forks, the `setns` syscall is used to switch it into a cached, completely clean mount namespace, effectively isolating it from all system modifications.
+2. **Namespace switching (fallback):**
+   If the direct unmount is aborted, or any trace fails to unmount, the forked app process is switched into a cached, clean mount namespace with `setns`.
 
-## Configuration
+### Configuration
 
-To configure the DenyList for a specific application, use the appropriate setting within your root management app:
+* **APatch / KernelSU:** enable **`Umount modules`** for the target app.
+* **Magisk:** use the **`Configure DenyList`** menu.
 
-*   **For APatch/KernelSU:** Enable the **`Umount modules`** option for your target application.
-*   **For Magisk:** Use the **`Configure DenyList`** menu.
+> [!IMPORTANT]
+> Magisk's **`Enforce DenyList`** option enables Magisk's *own* DenyList, which is separate from NyaZygisk, does not guarantee hiding all mount traces, and may conflict with NyaZygisk. Keep it disabled.
 
-> **Important Note for Magisk Users**
->
-> The **`Enforce DenyList`** option in Magisk enables Magisk's *own* DenyList implementation. This is separate from NyaZygisk's functionality, is not guaranteed to hide all mount-related traces, and may conflict with NyaZygisk's hiding mechanisms. It is strongly recommended to leave this option disabled and rely solely on NyaZygisk's configuration.
+## Property Spoofing
+
+At startup, NyaZygisk reads `/data/adb/modules/zygisksu/spoof.prop` and overrides the listed system properties in hooked property reads. The default file covers:
+
+* bootloader and verified boot state (`ro.boot.verifiedbootstate`, `ro.boot.vbmeta.device_state`, `ro.boot.flash.locked`, ...);
+* build type and debuggable flags;
+* vendor-specific properties for MIUI, Realme, and OPlus.
+
+`ro.boot.vbmeta.digest` is generated randomly each time the properties are loaded. Edit `spoof.prop` to add, change, or remove entries; lines starting with `#` are ignored.
+
+## Building
+
+Requirements: JDK 21, Android SDK with NDK `27.2.12479018`, Rust with [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+
+```sh
+./gradlew zipRelease zipDebug
+```
+
+The module zips are written to `module/build/outputs/release/`.
 
 ## Credits & Acknowledgements
 
-* [NeoZygisk](https://github.com/JingMatrix/NeoZygisk): The original base project
-* [Magisk](https://github.com/topjohnwu/Magisk): The foundation of modern Android root & Zygisk
-* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): Reference implementation for standalone Zygisk Next API
-* [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): The original Zygisk Next module architecture
-* [Dobby](https://github.com/LSPosed/Dobby): In-process code hooking engine
+* [NeoZygisk](https://github.com/JingMatrix/NeoZygisk): the original base project
+* [Magisk](https://github.com/topjohnwu/Magisk): the foundation of modern Android root and Zygisk
+* [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): the original Zygisk Next architecture and API
+* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): reference implementation of the standalone Zygisk Next API
+* [Dobby](https://github.com/LSPosed/Dobby): inline hooking engine
 * [LSPlt](https://github.com/LSPosed/LSPlt): PLT hooking library for Android
-* [LZMA SDK](https://www.7-zip.org/sdk.html): ELF `.gnu_debugdata` decompression
+* [xz-embedded](https://github.com/tukaani-project/xz-embedded): `.gnu_debugdata` decompression
+
+## License
+
+NyaZygisk is licensed under the [GNU General Public License v3.0](LICENSE).
