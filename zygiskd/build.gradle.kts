@@ -26,7 +26,6 @@ val ndkDirProvider = androidComponents.sdkComponents.ndkDirectory
 val abiToTriple = linkedMapOf(
     "arm64-v8a" to "aarch64-linux-android",
     "armeabi-v7a" to "armv7-linux-androideabi",
-    "x86" to "i686-linux-android",
     "x86_64" to "x86_64-linux-android",
 )
 

@@ -75,7 +75,7 @@ else
 fi
 
 # check architecture
-if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x86" ] && [ "$ARCH" != "x64" ]; then
+if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x64" ]; then
   abort "! Unsupported platform: $ARCH"
 else
   ui_print "- Device platform: $ARCH"
@@ -135,14 +135,7 @@ mkdir "$MODPATH/bin"
 mkdir "$MODPATH/lib"
 mkdir "$MODPATH/lib64"
 
-if [ "$ARCH" = "x86" ]; then
-  ui_print "- Extracting x86 libraries"
-  extract "$ZIPFILE" 'bin/x86/zygiskd' "$MODPATH/bin" true
-  mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd32"
-  extract "$ZIPFILE" 'lib/x86/libzygisk.so' "$MODPATH/lib" true
-  extract "$ZIPFILE" 'lib/x86/libzygisk_ptrace.so' "$MODPATH/bin" true
-  mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace32"
-elif [ "$ARCH" = "x64" ]; then
+if [ "$ARCH" = "x64" ]; then
   ui_print "- Extracting x64 libraries"
   extract "$ZIPFILE" 'bin/x86_64/zygiskd' "$MODPATH/bin" true
   mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"

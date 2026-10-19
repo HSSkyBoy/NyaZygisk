@@ -56,6 +56,7 @@ android {
     }
 
     defaultConfig {
+        ndk.abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         externalNativeBuild.cmake {
             cFlags("-std=c18", *defaultCFlags)
             cppFlags("-std=c++20", *defaultCFlags)
