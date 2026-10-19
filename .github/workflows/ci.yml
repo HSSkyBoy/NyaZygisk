@@ -14,6 +14,10 @@ on:
   pull_request:
   merge_group:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -46,7 +50,6 @@ jobs:
 
       - name: Install SDK 37 & NDK
         run: |
-          sdkmanager "platform-tools"
           sdkmanager "platforms;android-37.0"
           sdkmanager "build-tools;37.0.0"
           sdkmanager "ndk;27.2.12479018"
@@ -62,8 +65,10 @@ jobs:
       - name: Install cargo-ndk
         # The zygiskd build invokes `cargo ndk` to cross-compile the daemon.
         # Intentionally unpinned: the build uses the `--platform` flag, which is
-        # stable across cargo-ndk releases. See the commit message for the caveat.
-        run: cargo install cargo-ndk --locked
+        # stable across cargo-ndk releases. Prebuilt binary avoids a source build.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
 
       - name: Setup Ccache for faster builds
         uses: hendrikmuhs/ccache-action@v1
