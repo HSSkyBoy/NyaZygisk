@@ -3,8 +3,11 @@ project(external)
 option(LSPLT_BUILD_SHARED OFF)
 add_subdirectory(lsplt/lsplt/src/main/jni)
 
-option(DOBBY_BUILD_SHARED OFF)
-option(DOBBY_GENERATE_SHARED OFF)
-add_subdirectory(dobby)
+# Dobby has no riscv64 backend; inline hook is unavailable there.
+if(NOT ANDROID_ABI STREQUAL "riscv64")
+    option(DOBBY_BUILD_SHARED OFF)
+    option(DOBBY_GENERATE_SHARED OFF)
+    add_subdirectory(dobby)
+endif()
 
 add_subdirectory(lzma)

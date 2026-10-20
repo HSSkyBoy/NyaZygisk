@@ -125,7 +125,7 @@ bool get_regs(int pid, struct user_regs_struct &regs) {
         PLOGE("ptrace(PTRACE_GETREGS)");
         return false;
     }
-#elif defined(__aarch64__) || defined(__arm__)
+#elif defined(__aarch64__) || defined(__arm__) || defined(__riscv)
     struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
     if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) == -1) {
         PLOGE("ptrace(PTRACE_GETREGSET)");
@@ -148,7 +148,7 @@ bool set_regs(int pid, struct user_regs_struct &regs) {
         PLOGE("ptrace(PTRACE_SETREGS)");
         return false;
     }
-#elif defined(__aarch64__) || defined(__arm__)
+#elif defined(__aarch64__) || defined(__arm__) || defined(__riscv)
     struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
     if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &iov) == -1) {
         PLOGE("ptrace(PTRACE_SETREGSET)");
@@ -499,6 +499,25 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
         }
     }
     regs.regs[30] = return_addr;  // Link Register (LR)
+    regs.REG_IP = func_addr;
+
+#elif defined(__riscv) && __riscv_xlen == 64
+    // ABI: a0-a7, then stack
+    unsigned long *arg_regs[] = {&regs.a0, &regs.a1, &regs.a2, &regs.a3,
+                                 &regs.a4, &regs.a5, &regs.a6, &regs.a7};
+    for (size_t i = 0; i < args.size() && i < 8; i++) {
+        *arg_regs[i] = args[i];
+    }
+    if (args.size() > 8) {
+        size_t stack_args_size = (args.size() - 8) * sizeof(long);
+        regs.REG_SP -= stack_args_size;
+        if (write_proc(pid, regs.REG_SP, args.data() + 8, stack_args_size) !=
+            (ssize_t) stack_args_size) {
+            LOGE("failed to push stack arguments for riscv64 call");
+            return 0;
+        }
+    }
+    regs.ra = return_addr;  // Return Address (RA)
     regs.REG_IP = func_addr;
 
 #elif defined(__arm__)

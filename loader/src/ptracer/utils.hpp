@@ -49,6 +49,12 @@ struct MapInfo {
 #define REG_IP pc
 #define REG_RET regs[0]
 #define REG_SYSNR regs[8]
+#elif defined(__riscv) && __riscv_xlen == 64
+#undef REG_SP  // bionic's <sys/ucontext.h> defines it for riscv64
+#define REG_SP sp
+#define REG_IP pc
+#define REG_RET a0
+#define REG_SYSNR a7
 #elif defined(__arm__)
 #define REG_SP uregs[13]
 #define REG_IP uregs[15]

@@ -27,6 +27,7 @@ val abiToTriple = linkedMapOf(
     "arm64-v8a" to "aarch64-linux-android",
     "armeabi-v7a" to "armv7-linux-androideabi",
     "x86_64" to "x86_64-linux-android",
+    "riscv64" to "riscv64-linux-android",
 )
 
 listOf("Debug", "Release").forEach { variantCap ->
@@ -49,24 +50,50 @@ listOf("Debug", "Release").forEach { variantCap ->
             val outJniDir = layout.buildDirectory.dir("intermediates/rust/$profileName/jniLibs").get().asFile
             val symbolDir = layout.buildDirectory.dir("symbols/$profileName").get().asFile
 
+            fun runCargo(cargoArgs: List<String>, extraEnv: Map<String, String> = emptyMap()) {
+                val exec = providers.exec {
+                    workingDir = projectDir
+                    environment("ANDROID_NDK_HOME", ndkFile.absolutePath)
+                    environment("MIN_APATCH_VERSION", minAPatchVersion.toString())
+                    environment("MIN_KSU_VERSION", minKsuVersion.toString())
+                    environment("MAX_KSU_VERSION", maxKsuVersion.toString())
+                    environment("MIN_MAGISK_VERSION", minMagiskVersion.toString())
+                    environment("ZKSU_VERSION", "$verName-$verCode-$commitHash-$profileName")
+                    extraEnv.forEach { (k, v) -> environment(k, v) }
+                    commandLine(cargoArgs)
+                    isIgnoreExitValue = true
+                }
+                if (exec.result.get().exitValue != 0) {
+                    System.err.println(exec.standardOutput.asText.get())
+                    System.err.println(exec.standardError.asText.get())
+                }
+                exec.result.get().assertNormalExitValue()
+            }
+            val profileArgs = if (isRelease) listOf("--release") else emptyList()
+
             // cargo-ndk wires the correct NDK linker/ar per ABI; one invocation builds every ABI.
             // Use the long `--platform` flag: it is stable across cargo-ndk 3.x and 4.x,
             // unlike the short flag which was renamed from `-p` to `-P` in 4.0.3.
             val cargoArgs = mutableListOf("cargo", "ndk", "--platform", androidMinSdkVersion.toString())
-            abiToTriple.keys.forEach { abi -> cargoArgs += listOf("-t", abi) }
-            cargoArgs += listOf("build", "--target-dir", targetDir.absolutePath)
-            if (isRelease) cargoArgs += "--release"
+            (abiToTriple.keys - "riscv64").forEach { abi -> cargoArgs += listOf("-t", abi) }
+            cargoArgs += listOf("build", "--target-dir", targetDir.absolutePath) + profileArgs
+            runCargo(cargoArgs)
 
-            providers.exec {
-                workingDir = projectDir
-                environment("ANDROID_NDK_HOME", ndkFile.absolutePath)
-                environment("MIN_APATCH_VERSION", minAPatchVersion.toString())
-                environment("MIN_KSU_VERSION", minKsuVersion.toString())
-                environment("MAX_KSU_VERSION", maxKsuVersion.toString())
-                environment("MIN_MAGISK_VERSION", minMagiskVersion.toString())
-                environment("ZKSU_VERSION", "$verName-$verCode-$commitHash-$profileName")
-                commandLine(cargoArgs)
-            }.result.get().assertNormalExitValue()
+            // cargo-ndk does not know riscv64, so wire the NDK linker by hand. The target is
+            // tier 3 in Rust (no prebuilt std) and the NDK only ships riscv64 sysroots from API 35.
+            val cmdExt = if (prebuilt.name.contains("windows")) ".cmd" else ""
+            val rvClang = File(binDir, "riscv64-linux-android35-clang$cmdExt").absolutePath
+            runCargo(
+                listOf(
+                    "cargo", "build", "--target", abiToTriple.getValue("riscv64"),
+                    "-Zbuild-std=std,panic_abort", "--target-dir", targetDir.absolutePath,
+                ) + profileArgs,
+                mapOf(
+                    "CARGO_TARGET_RISCV64_LINUX_ANDROID_LINKER" to rvClang,
+                    "CC_riscv64_linux_android" to rvClang,
+                    "AR_riscv64_linux_android" to File(binDir, "llvm-ar$exeExt").absolutePath,
+                ),
+            )
 
             // Strip each binary, keeping a detached debug-symbol file linked back via gnu-debuglink.
             abiToTriple.forEach { (abi, triple) ->

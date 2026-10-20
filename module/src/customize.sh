@@ -75,7 +75,7 @@ else
 fi
 
 # check architecture
-if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x64" ]; then
+if [ "$ARCH" != "arm" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x64" ] && [ "$ARCH" != "riscv64" ]; then
   abort "! Unsupported platform: $ARCH"
 else
   ui_print "- Device platform: $ARCH"
@@ -155,6 +155,13 @@ elif [ "$ARCH" = "arm64" ]; then
   mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
   extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk.so' "$MODPATH/lib64" true
   extract "$ZIPFILE" 'lib/arm64-v8a/libzygisk_ptrace.so' "$MODPATH/bin" true
+  mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
+elif [ "$ARCH" = "riscv64" ]; then
+  ui_print "- Extracting riscv64 libraries"
+  extract "$ZIPFILE" 'bin/riscv64/zygiskd' "$MODPATH/bin" true
+  mv "$MODPATH/bin/zygiskd" "$MODPATH/bin/zygiskd64"
+  extract "$ZIPFILE" 'lib/riscv64/libzygisk.so' "$MODPATH/lib64" true
+  extract "$ZIPFILE" 'lib/riscv64/libzygisk_ptrace.so' "$MODPATH/bin" true
   mv "$MODPATH/bin/libzygisk_ptrace.so" "$MODPATH/bin/zygisk-ptrace64"
 fi
 

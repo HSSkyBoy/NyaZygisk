@@ -331,6 +331,8 @@ fn get_arch() -> Result<&'static str> {
         Ok(lp_select!("armeabi-v7a", "arm64-v8a"))
     } else if system_arch.contains("x86") {
         Ok(lp_select!("x86", "x86_64"))
+    } else if system_arch.contains("riscv64") {
+        Ok("riscv64")
     } else {
         bail!("Unsupported system architecture: {}", system_arch)
     }

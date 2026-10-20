@@ -4,7 +4,9 @@
 #include "elf_util.h"
 #include "logging.hpp"
 
+#if !defined(__riscv)
 #include <dobby.h>
+#endif
 #include <lsplt.hpp>
 
 #include <android/dlext.h>
@@ -37,6 +39,18 @@ namespace {
 
 std::mutex g_hook_mutex;
 std::set<uintptr_t> g_hooked;
+
+// Dobby has no riscv64 backend, so inline hook is unavailable there.
+#if defined(__riscv)
+bool dobbyHook(void*, void*, void**) { return false; }
+bool dobbyDestroy(void*) { return false; }
+#else
+bool dobbyHook(void* target, void* addr, void** original) {
+    return DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(addr),
+                     reinterpret_cast<dobby_dummy_func_t*>(original)) == RS_SUCCESS;
+}
+bool dobbyDestroy(void* target) { return DobbyDestroy(target) == RS_SUCCESS; }
+#endif
 
 int api_pltHook(void* base, const char* symbol, void* hook, void** original) {
     if (!base || !symbol || !hook) return ZN_FAILED;
@@ -94,8 +108,7 @@ int api_inlineHook(void* target, void* addr, void** original) {
         }
     }
 
-    if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(addr),
-                  reinterpret_cast<dobby_dummy_func_t*>(original)) != RS_SUCCESS) {
+    if (!dobbyHook(target, addr, original)) {
         LOGE("ZN inlineHook %p: DobbyHook failed", target);
         std::lock_guard<std::mutex> lk(g_hook_mutex);
         g_hooked.erase(t);
@@ -112,7 +125,7 @@ int api_inlineUnhook(void* target) {
         std::lock_guard<std::mutex> lk(g_hook_mutex);
         if (g_hooked.find(t) == g_hooked.end()) return ZN_FAILED;
     }
-    if (DobbyDestroy(target) != RS_SUCCESS) return ZN_FAILED;
+    if (!dobbyDestroy(target)) return ZN_FAILED;
 
     std::lock_guard<std::mutex> lk(g_hook_mutex);
     g_hooked.erase(t);
@@ -182,8 +195,7 @@ int api_connectCompanion(void* handle) {
 // Helper: Raw inline hook via Dobby
 bool inlineHookRaw(void* target, void* addr, void** original) {
     if (!target || !addr) return false;
-    return DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(addr),
-                     reinterpret_cast<dobby_dummy_func_t*>(original)) == RS_SUCCESS;
+    return dobbyHook(target, addr, original);
 }
 
 // ZN API v4 Runtime: the HyperOS Rust Runtime (HYOS)
