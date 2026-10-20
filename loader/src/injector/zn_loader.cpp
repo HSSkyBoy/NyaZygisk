@@ -93,16 +93,17 @@ void loadAllModules(unsigned char connect_retry) {
     auto plan = zygiskd::GetZnPlan(proc_name, proc_path, connect_retry);
     LOGI("ZN: received %zu module(s) from daemon", plan.size());
 
-    bool any_loaded = false;
+    size_t loaded_count = 0;
     for (const auto& entry : plan) {
         if (entry.lib_fd.get() < 0) continue;
-        if (loadEntry(entry)) any_loaded = true;
+        if (loadEntry(entry)) loaded_count++;
     }
 
-    // Batch the maps cleanup after the whole plan is processed, same as the regular Zygisk
+    // Batch the cleanup after the whole plan is processed, same as the regular Zygisk
     // module path does once for every module instead of per-module.
-    if (any_loaded && is_anonymous_memory_enabled()) {
+    if (loaded_count > 0 && is_anonymous_memory_enabled()) {
         spoof_virtual_maps(kZnMemfdName, /*private_only=*/true);
+        clean_linker_trace(kZnMemfdName, loaded_count, loaded_count, /*unload_soinfo=*/true);
     }
 }
 
