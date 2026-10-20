@@ -80,6 +80,7 @@ enum class SocketAction {
     GetSharedMemoryFd,
     RequestZnCompanionSocket,
     GetZnPlan,
+    ReportZnModule,
 };
 
 enum class MountNamespace { Clean, Root };
@@ -106,6 +107,9 @@ int ConnectZnCompanion(const std::string& lib_path);
 
 std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path,
                                    uint8_t retry = 1);
+
+// Tells the daemon whether a ZN module's onModuleLoaded ran in this process.
+void ReportZnModule(const std::string& lib_path, bool injected);
 
 int GetModuleDir(size_t index);
 

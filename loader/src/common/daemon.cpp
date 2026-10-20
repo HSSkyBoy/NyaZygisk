@@ -284,6 +284,22 @@ std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::s
     return entries;
 }
 
+void ReportZnModule(const std::string& lib_path, bool injected) {
+    UniqueFd fd = Connect(1);
+    if (fd == -1) {
+        PLOGE("ReportZnModule");
+        return;
+    }
+    if (!socket_utils::write_u8(fd, (uint8_t) SocketAction::ReportZnModule) ||
+        !socket_utils::write_string(fd, lib_path) ||
+        !socket_utils::write_u8(fd, injected ? 1 : 0)) {
+        PLOGE("ReportZnModule: write request");
+        return;
+    }
+    // Wait for the ack so the report is recorded before the process moves on (and possibly forks).
+    socket_utils::read_u8(fd);
+}
+
 int GetModuleDir(size_t index) {
     UniqueFd fd = Connect(1);
     if (fd == -1) {

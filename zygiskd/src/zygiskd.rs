@@ -46,6 +46,7 @@ struct AppContext {
     modules: Vec<Module>,
     mount_manager: Arc<MountNamespaceManager>,
     zn_companions: Mutex<HashMap<PathBuf, UnixStream>>,
+    zn_states: Mutex<HashMap<PathBuf, (u32, u32)>>,
 }
 
 // Global paths, initialized once at startup.
@@ -92,6 +93,7 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
         modules,
         mount_manager,
         zn_companions: Mutex::new(HashMap::new()),
+        zn_states: Mutex::new(HashMap::new()),
     });
     let listener = create_daemon_socket()?;
     spawn_config_watcher();
@@ -146,6 +148,8 @@ fn handle_connection(mut stream: UnixStream, context: Arc<AppContext>) -> Result
                 module.companion.lock().unwrap().take();
             }
             context.zn_companions.lock().unwrap().clear();
+            context.zn_states.lock().unwrap().clear();
+            write_zn_state_file(&HashMap::new());
         }
         DaemonSocketAction::SystemServerStarted => {
             let value = constants::SYSTEM_SERVER_STARTED;
@@ -189,6 +193,7 @@ fn handle_threaded_action(
         DaemonSocketAction::GetModuleDir => handle_get_module_dir(&mut stream, context),
         DaemonSocketAction::GetSharedMemoryFd => handle_get_shared_memory_fd(&mut stream),
         DaemonSocketAction::GetZnPlan => handle_get_zn_plan(&mut stream, context),
+        DaemonSocketAction::ReportZnModule => handle_report_zn_module(&mut stream, context),
         // Other cases are handled synchronously and won't reach here.
         _ => unreachable!(),
     }
@@ -840,6 +845,53 @@ fn handle_get_zn_plan(stream: &mut UnixStream, _context: &AppContext) -> Result<
         stream.write_u8(if m.companion { 1 } else { 0 })?;
         stream.send_fd(m.lib_fd.as_raw_fd())?;
     }
+    Ok(())
+}
+
+fn write_zn_state_file(states: &HashMap<PathBuf, (u32, u32)>) {
+    let Some(tmp) = TMP_PATH.get() else { return };
+    let mut lines: Vec<String> = states
+        .iter()
+        .map(|(path, (injected, failed))| {
+            let state = if *failed > 0 { "failed" } else if *injected > 0 { "injected" } else { "unknown" };
+            format!("{} {}", state, path.display())
+        })
+        .collect();
+    lines.sort();
+    let target = format!("{}/zn_modules_state", tmp);
+    let staging = format!("{}.tmp", target);
+    let result = fs::write(&staging, lines.join("\n") + "\n").and_then(|_| fs::rename(&staging, &target));
+    if let Err(e) = result {
+        warn!("Failed to write {}: {}", target, e);
+    }
+}
+
+fn handle_report_zn_module(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
+    let lib_path = PathBuf::from(stream.read_string()?);
+    let injected = stream.read_u8()? != 0;
+
+    // Only paths inside the modules directory are tracked; anything else is not a ZN module we handed out.
+    let modules_dir = fs::canonicalize(constants::PATH_MODULES_DIR)?;
+    if lib_path.strip_prefix(&modules_dir).is_ok() {
+        let mut states = context.zn_states.lock().unwrap();
+        let entry = states.entry(lib_path.clone()).or_insert((0, 0));
+        if injected {
+            entry.0 += 1;
+        } else {
+            entry.1 += 1;
+        }
+        info!(
+            "ZN: module `{}` {} (injected={}, failed={})",
+            lib_path.display(),
+            if injected { "injected" } else { "failed to load" },
+            entry.0,
+            entry.1
+        );
+        write_zn_state_file(&states);
+    } else {
+        warn!("ZN: ignoring report for `{}` outside the modules directory", lib_path.display());
+    }
+    stream.write_u8(1)?;
     Ok(())
 }
 

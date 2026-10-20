@@ -62,6 +62,7 @@ pub enum DaemonSocketAction {
     GetSharedMemoryFd,
     RequestZnCompanionSocket,
     GetZnPlan,
+    ReportZnModule,
 }
 
 bitflags! {

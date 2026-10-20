@@ -42,18 +42,21 @@ void loadEntry(const zygiskd::ZnPlanEntry& entry) {
     void* lib = DlopenMem(entry.lib_fd.get(), RTLD_NOW, entry.lib_path.c_str());
     if (!lib) {
         LOGE("ZN: dlopen %s (fd %d) failed: %s", entry.lib_path.c_str(), entry.lib_fd.get(), dlerror());
+        zygiskd::ReportZnModule(entry.lib_path, false);
         return;
     }
 
     auto* m = reinterpret_cast<ZygiskNextModule*>(dlsym(lib, "zn_module"));
     if (!m || !m->onModuleLoaded) {
         LOGE("ZN: %s does not export zn_module", entry.lib_path.c_str());
+        zygiskd::ReportZnModule(entry.lib_path, false);
         return;
     }
 
     if (m->target_api_version > ZYGISK_NEXT_API_VERSION) {
         LOGW("ZN: %s requires API version %d, only up to %d supported", entry.lib_path.c_str(),
              m->target_api_version, ZYGISK_NEXT_API_VERSION);
+        zygiskd::ReportZnModule(entry.lib_path, false);
         return;
     }
 
@@ -72,6 +75,7 @@ void loadEntry(const zygiskd::ZnPlanEntry& entry) {
     LOGI("ZN: loading module %s (companion=%s, api=%d)", entry.lib_path.c_str(),
          entry.companion ? "yes" : "no", m->target_api_version);
     m->onModuleLoaded(handle, api);
+    zygiskd::ReportZnModule(entry.lib_path, true);
 }
 
 }  // namespace
