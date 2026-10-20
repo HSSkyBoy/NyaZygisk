@@ -459,7 +459,7 @@ int spoof_virtual_maps(const char *path_substr, bool private_only) {
 
 
 void spoof_module_maps(bool clear_write_permission) {
-    constexpr std::array paths{"jit-cache-zygisk", "zygisk-module"};
+    constexpr std::array paths{"jit-cache-zygisk", "zygisk-module", "zn-module"};
     for (const char *path : paths) {
         spoof_virtual_maps(path, /*private_only=*/true);
     }

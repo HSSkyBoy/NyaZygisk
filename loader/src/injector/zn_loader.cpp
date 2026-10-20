@@ -3,6 +3,7 @@
 #include "logging.hpp"
 #include "daemon.hpp"
 #include "dl.hpp"
+#include "zygisk.hpp"
 #include "zygisk_next_api.h"
 
 #include <dlfcn.h>
@@ -38,26 +39,28 @@ std::string getProcessName() {
     return pos == std::string::npos ? p : p.substr(pos + 1);
 }
 
-void loadEntry(const zygiskd::ZnPlanEntry& entry) {
-    void* lib = DlopenMem(entry.lib_fd.get(), RTLD_NOW, entry.lib_path.c_str());
+constexpr char kZnMemfdName[] = "zn-module";
+
+bool loadEntry(const zygiskd::ZnPlanEntry& entry) {
+    void* lib = DlopenMem(entry.lib_fd.get(), RTLD_NOW, kZnMemfdName);
     if (!lib) {
         LOGE("ZN: dlopen %s (fd %d) failed: %s", entry.lib_path.c_str(), entry.lib_fd.get(), dlerror());
         zygiskd::ReportZnModule(entry.lib_path, false);
-        return;
+        return false;
     }
 
     auto* m = reinterpret_cast<ZygiskNextModule*>(dlsym(lib, "zn_module"));
     if (!m || !m->onModuleLoaded) {
         LOGE("ZN: %s does not export zn_module", entry.lib_path.c_str());
         zygiskd::ReportZnModule(entry.lib_path, false);
-        return;
+        return false;
     }
 
     if (m->target_api_version > ZYGISK_NEXT_API_VERSION) {
         LOGW("ZN: %s requires API version %d, only up to %d supported", entry.lib_path.c_str(),
              m->target_api_version, ZYGISK_NEXT_API_VERSION);
         zygiskd::ReportZnModule(entry.lib_path, false);
-        return;
+        return false;
     }
 
     auto* handle = new ZnModuleHandle();
@@ -76,6 +79,7 @@ void loadEntry(const zygiskd::ZnPlanEntry& entry) {
          entry.companion ? "yes" : "no", m->target_api_version);
     m->onModuleLoaded(handle, api);
     zygiskd::ReportZnModule(entry.lib_path, true);
+    return true;
 }
 
 }  // namespace
@@ -89,9 +93,16 @@ void loadAllModules(unsigned char connect_retry) {
     auto plan = zygiskd::GetZnPlan(proc_name, proc_path, connect_retry);
     LOGI("ZN: received %zu module(s) from daemon", plan.size());
 
+    bool any_loaded = false;
     for (const auto& entry : plan) {
         if (entry.lib_fd.get() < 0) continue;
-        loadEntry(entry);
+        if (loadEntry(entry)) any_loaded = true;
+    }
+
+    // Batch the maps cleanup after the whole plan is processed, same as the regular Zygisk
+    // module path does once for every module instead of per-module.
+    if (any_loaded && is_anonymous_memory_enabled()) {
+        spoof_virtual_maps(kZnMemfdName, /*private_only=*/true);
     }
 }
 
