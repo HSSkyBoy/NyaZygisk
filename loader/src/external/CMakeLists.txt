@@ -3,10 +3,6 @@ project(external)
 option(LSPLT_BUILD_SHARED OFF)
 add_subdirectory(lsplt/lsplt/src/main/jni)
 
-if (ANDROID_ABI STREQUAL "riscv64")
-	set(ANDROID_PLATFORM "android-35")
-endif ()
-
 # Dobby has no riscv64 backend; inline hook is unavailable there.
 if(NOT ANDROID_ABI STREQUAL "riscv64")
     option(DOBBY_BUILD_SHARED OFF)
