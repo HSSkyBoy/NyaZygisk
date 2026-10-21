@@ -12,9 +12,9 @@ There are two distinct module APIs in the Zygisk ecosystem:
 * **Magisk Zygisk API** (`zygisk_module_entry`): used by most Zygisk modules, such as LSPosed.
 * **Zygisk Next API** (`zn_module`, declared in `zn_modules.txt`): introduced by Zygisk Next after it went closed-source, offering inline / PLT hooking and HyperOS Rust Runtime callbacks.
 
-Before NyaZygisk, running both kinds of modules with open-source software meant stacking two modules: a Zygisk implementation (NeoZygisk or ReZygisk) plus a separate ZN loader (ZygiskNextNext). NyaZygisk does both in one GPL-3.0 module.
+Before NyaZygisk, running both kinds of modules with open-source software meant stacking two modules: a Zygisk implementation (NeoZygisk or ReZygisk) plus a separate ZN loader (ZNNext). NyaZygisk does both in one GPL-3.0 module.
 
-| | Zygisk Next | **NyaZygisk** | NeoZygisk | ReZygisk | ZygiskNextNext |
+| | Zygisk Next | **NyaZygisk** | NeoZygisk | ReZygisk | ZNNext |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | License | Closed source | **GPL-3.0** | GPL-3.0 | AGPL-3.0 | GPL-3.0 |
 | Magisk Zygisk API | ✅ | ✅ v5 | ✅ v5 | ✅ v5 | ❌ |
@@ -86,7 +86,7 @@ Telegram: [@NyaZygisk](t.me/NYAZYGISK)
 
 ## Known Limitations
 
-* **ZN module injection targets:** Zygisk Next and ZygiskNextNext can inject ZN modules into any init-spawned process declared with `path=` / `name=` in `zn_modules.txt`. NyaZygisk currently intercepts only Zygote and `hyos_spawner`, so ZN modules targeting other system daemons will not be loaded.
+* **ZN module injection targets:** Zygisk Next and ZNNext can inject ZN modules into any init-spawned process declared with `path=` / `name=` in `zn_modules.txt`. NyaZygisk currently intercepts only Zygote and `hyos_spawner`, so ZN modules targeting other system daemons will not be loaded.
 * **Architectures:** `riscv64` is not supported.
 
 ## The DenyList Explained
@@ -139,8 +139,9 @@ The module zips are written to `module/build/outputs/release/`.
 * [NeoZygisk](https://github.com/JingMatrix/NeoZygisk): the original base project
 * [Magisk](https://github.com/topjohnwu/Magisk): the foundation of modern Android root and Zygisk
 * [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): the original Zygisk Next architecture and API
-* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): reference implementation of the standalone Zygisk Next API
+* [ZNNext](https://github.com/VeryBaaad/ZNNext): reference implementation of the standalone Zygisk Next API
 * [Dobby](https://github.com/LSPosed/Dobby): inline hooking engine
+* [rv64hook](https://github.com/eirv/riscv64-inline-hook): inline hooking engine for RISC-v 64
 * [LSPlt](https://github.com/LSPosed/LSPlt): PLT hooking library for Android
 * [xz-embedded](https://github.com/tukaani-project/xz-embedded): `.gnu_debugdata` decompression
 
