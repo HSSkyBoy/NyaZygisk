@@ -4,3 +4,6 @@
 [submodule "loader/src/external/dobby"]
 	path = loader/src/external/dobby
 	url = https://github.com/LSPosed/Dobby.git
+[submodule "loader/src/external/rv64hook"]
+	path = loader/src/external/rv64hook
+	url = https://github.com/eirv/riscv64-inline-hook.git
