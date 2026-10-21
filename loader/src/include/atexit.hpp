@@ -1,8 +1,10 @@
 #pragma once
 
+#include <inttypes.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
@@ -13,7 +15,7 @@
 #include <sys/user.h>
 
 #include <memory>
-#include <sstream>
+#include <string>
 
 namespace Atexit {
 
@@ -63,27 +65,20 @@ public:
           total_appends_(initial_total_appends) {}
 
     std::string format_state_string() const {
-        std::stringstream ss;
-
-        // Use the << operator to stream text and variables into the stringstream.
-        // The '\n' and '\t' characters provide the desired logcat formatting.
-        ss << "\n--- Live AtexitArray Snapshot State ---\n";
-        ss << "\t(this pointer):  " << static_cast<const void*>(this) << "\n";
-        ss << "\tarray_:          " << static_cast<const void*>(array_) << "\n";
-
-        // For numeric values, show both decimal and hexadecimal for easier debugging.
-        ss << "\tsize_:           " << size_ << " (0x" << std::hex << size_ << std::dec << ")\n";
-        ss << "\textracted_count_: " << extracted_count_ << " (0x" << std::hex << extracted_count_
-           << std::dec << ")\n";
-        ss << "\tcapacity_:       " << capacity_ << " (0x" << std::hex << capacity_ << std::dec
-           << ")\n";
-        ss << "\ttotal_appends_:  " << total_appends_ << " (0x" << std::hex << total_appends_
-           << std::dec << ")\n";
-
-        ss << "---------------------------------------";
-
-        // The .str() method returns the complete, concatenated string.
-        return ss.str();
+        char buf[640];
+        snprintf(buf, sizeof(buf),
+                 "\n--- Live AtexitArray Snapshot State ---\n"
+                 "\t(this pointer):  %p\n"
+                 "\tarray_:          %p\n"
+                 "\tsize_:           %zu (0x%zx)\n"
+                 "\textracted_count_: %zu (0x%zx)\n"
+                 "\tcapacity_:       %zu (0x%zx)\n"
+                 "\ttotal_appends_:  %" PRIu64 " (0x%" PRIx64 ")\n"
+                 "---------------------------------------",
+                 static_cast<const void*>(this), static_cast<const void*>(array_), size_, size_,
+                 extracted_count_, extracted_count_, capacity_, capacity_, total_appends_,
+                 total_appends_);
+        return buf;
     }
 
     size_t size() const { return size_; }

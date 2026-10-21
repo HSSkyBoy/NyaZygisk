@@ -10,7 +10,11 @@
 
 #include <array>
 #include <cstdint>
-#include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "logging.hpp"
@@ -35,24 +39,29 @@
  */
 
 static bool should_skip_seccomp_injection() {
-    // Use std::ifstream for automatic resource management (RAII).
-    std::ifstream status_file("/proc/self/status");
-    if (!status_file.is_open()) {
+    // fopen/getline instead of std::ifstream: iostreams pull libc++'s locale into the binary.
+    FILE *status_file = fopen("/proc/self/status", "re");
+    if (status_file == nullptr) {
         // Fail-safe: if we can't check, we skip the injection.
         return true;
     }
 
     const std::string needle = "Seccomp_filters:";
-    std::string line;
+    char *line = nullptr;
+    size_t cap = 0;
+    bool found = false;
 
-    while (std::getline(status_file, line)) {
+    while (getline(&line, &cap, status_file) != -1) {
         // C++20's starts_with is safer and more expressive than strncmp.
-        if (line.starts_with(needle)) {
-            return true;
+        if (std::string_view(line).starts_with(needle)) {
+            found = true;
+            break;
         }
     }
 
-    return false;
+    free(line);
+    fclose(status_file);
+    return found;
 }
 
 void send_seccomp_event_if_needed() {
@@ -65,17 +74,18 @@ void send_seccomp_event_if_needed() {
 
     // Read random bytes to create a unique syscall signature.
     {
-        std::ifstream random_file("/dev/urandom", std::ios::binary);
-        if (!random_file.is_open()) {
+        int random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (random_fd < 0) {
             PLOGE("seccomp: open(/dev/urandom)");
             return;
         }
-        random_file.read(reinterpret_cast<char *>(args.data()), args.size() * sizeof(uint32_t));
-        if (!random_file) {
+        ssize_t nread = read(random_fd, args.data(), args.size() * sizeof(uint32_t));
+        close(random_fd);
+        if (nread != static_cast<ssize_t>(args.size() * sizeof(uint32_t))) {
             PLOGE("seccomp: read(random_file)");
             return;
         }
-    }  // random_file is automatically closed here by its destructor.
+    }
 
     // Modify a bit to ensure the signature is highly unlikely to occur naturally.
     args[0] |= 0x10000;

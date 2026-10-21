@@ -30,3 +30,8 @@ int parse_int(std::string_view s) {
     // Return the designated error value if parsing fails.
     return -1;
 }
+
+extern "C" char *__cxa_demangle(const char *, char *, size_t *, int *status) {
+    if (status != nullptr) *status = -2;
+    return nullptr;
+}

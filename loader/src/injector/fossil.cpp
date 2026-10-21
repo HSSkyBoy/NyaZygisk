@@ -1,8 +1,12 @@
 #include "fossil.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <sstream>
+#include <string_view>
 
 #include "logging.hpp"
 
@@ -94,28 +98,27 @@ void MountArgv::dump(const char* summary) const {
         return;
     }
 
-    // Use std::ostringstream to build the entire log message in memory first.
-    // Using tabs (`\t`) for indentation allows the log viewer to control the
-    // visual alignment.
-    std::ostringstream oss;
-
-    oss << "--- Parsed Mount Argument Vector Fossil ---\n"
-        << "\tStart Address:\t" << static_cast<const void*>(m_start_address) << "\n"
-        << "\tFossil Size:\t" << m_fossil_size << " bytes\n"
-        << "\tSource:\t\t\t'" << m_source << "'\n"
-        << "\tTarget:\t\t\t'" << m_target << "'\n"
-        << "\tFS Type:\t\t'" << m_filesystem_type << "'\n"
-        << "\tOptions:\t\t'" << m_mount_options
-        << "'\n"
-        // Use std::hex and std::showbase for clean, reliable "0x..." formatting.
-        << "\tBase Flags:\t\t" << std::showbase << std::hex << m_base_flags
-        << "\n"
-        // std::dec is needed to switch back to decimal for subsequent numbers.
-        << "\tRemnant Size:\t" << std::dec << m_remnant_size << " bytes (until '\\0\\0')\n"
-        << "-------------------------------------------";
+    std::string text(m_source.size() + m_target.size() + m_filesystem_type.size() +
+                         m_mount_options.size() + 512,
+                     '\0');
+    int len = snprintf(text.data(), text.size(),
+                       "--- Parsed Mount Argument Vector Fossil ---\n"
+                       "\tStart Address:\t%p\n"
+                       "\tFossil Size:\t%zu bytes\n"
+                       "\tSource:\t\t\t'%s'\n"
+                       "\tTarget:\t\t\t'%s'\n"
+                       "\tFS Type:\t\t'%s'\n"
+                       "\tOptions:\t\t'%s'\n"
+                       "\tBase Flags:\t\t%#x\n"
+                       "\tRemnant Size:\t%zu bytes (until '\\0\\0')\n"
+                       "-------------------------------------------",
+                       static_cast<const void*>(m_start_address), m_fossil_size, m_source.c_str(),
+                       m_target.c_str(), m_filesystem_type.c_str(), m_mount_options.c_str(),
+                       m_base_flags, m_remnant_size);
+    text.resize(len > 0 ? std::min<size_t>(len, text.size() - 1) : 0);
 
     // Issue a single, atomic log call with the fully formatted string.
-    LOGV("%s\n%s", summary, oss.str().c_str());
+    LOGV("%s\n%s", summary, text.c_str());
 }
 
 // --- Private Implementation ---
@@ -180,6 +183,17 @@ static void trim_leading(std::string& s) {
             std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
 }
 
+// Pops the next whitespace-delimited token off the front of `s`.
+static std::string_view next_token(std::string_view& s) {
+    size_t begin = 0;
+    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) begin++;
+    size_t end = begin;
+    while (end < s.size() && !std::isspace(static_cast<unsigned char>(s[end]))) end++;
+    std::string_view token = s.substr(begin, end - begin);
+    s.remove_prefix(end);
+    return token;
+}
+
 static MountInfoEntry parseMountInfoLine(const std::string& line) {
     MountInfoEntry entry;
 
@@ -190,41 +204,36 @@ static MountInfoEntry parseMountInfoLine(const std::string& line) {
     }
 
     // Part 1: Before the separator. Contains the target mount point.
-    std::string before_separator = line.substr(0, separator_pos);
-    std::stringstream ss_before(before_separator);
-    std::string dummy_token;
+    std::string_view before(line.data(), separator_pos);
 
     // The mountinfo format has fixed fields before the target.
     // We must read and discard the first four fields to isolate the fifth.
-    ss_before >> dummy_token;  // Field 1: mount-id
-    ss_before >> dummy_token;  // Field 2: parent-id
-    ss_before >> dummy_token;  // Field 3: major:minor
-    ss_before >> dummy_token;  // Field 4: root
+    next_token(before);  // Field 1: mount-id
+    next_token(before);  // Field 2: parent-id
+    next_token(before);  // Field 3: major:minor
+    next_token(before);  // Field 4: root
 
     // The fifth field is the target mount point.
-    ss_before >> entry.target;
+    entry.target = std::string(next_token(before));
 
     // Part 2: After the separator. Contains fs-type, source, and superblock options.
-    std::string after_separator = line.substr(separator_pos + 3);
-    std::stringstream ss_after(after_separator);
+    std::string_view after(line.data() + separator_pos + 3, line.size() - separator_pos - 3);
 
-    // The first token is the filesystem type.
-    ss_after >> entry.filesystem_type;
-
-    // The second token is the source device.
-    ss_after >> entry.source;
+    // The first token is the filesystem type, the second is the source device.
+    entry.filesystem_type = std::string(next_token(after));
+    entry.source = std::string(next_token(after));
 
     // Everything that remains on the line is the superblock options.
-    std::getline(ss_after, entry.mount_options);
-    trim_leading(entry.mount_options);  // Remove any leading space left by getline.
+    entry.mount_options = std::string(after);
+    trim_leading(entry.mount_options);  // Remove any leading space left after the source.
 
     return entry;
 }
 
 std::vector<MountInfoEntry> parseMountInfo() {
     std::vector<MountInfoEntry> entries;
-    std::ifstream mountinfo_file("/proc/self/mountinfo");
-    if (!mountinfo_file.is_open()) {
+    FILE* mountinfo_file = fopen("/proc/self/mountinfo", "re");
+    if (mountinfo_file == nullptr) {
         LOGE("failed to open /proc/self/mountinfo");
         return entries;
     }
@@ -233,7 +242,12 @@ std::vector<MountInfoEntry> parseMountInfo() {
                                                "/data/adb", "/adb/modules",   "/dev/block/loop"};
 
     std::string line;
-    while (std::getline(mountinfo_file, line)) {
+    char* raw_line = nullptr;
+    size_t raw_cap = 0;
+    ssize_t raw_len;
+    while ((raw_len = getline(&raw_line, &raw_cap, mountinfo_file)) != -1) {
+        if (raw_len > 0 && raw_line[raw_len - 1] == '\n') raw_len--;
+        line.assign(raw_line, raw_len);
         MountInfoEntry entry = parseMountInfoLine(line);
 
         for (const auto& keyword : keywords) {
@@ -245,6 +259,8 @@ std::vector<MountInfoEntry> parseMountInfo() {
 
         entries.push_back(entry);
     }
+    free(raw_line);
+    fclose(mountinfo_file);
     return entries;
 }
 }  // namespace Fossil
