@@ -40,7 +40,7 @@ val releaseFlags = arrayOf(
     "-fvisibility=hidden", "-fvisibility-inlines-hidden",
     "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
     "-ffunction-sections", "-fdata-sections",
-    "-Wl,--exclude-libs,ALL", "-Wl,--gc-sections", "-Wl,--icf=all", "-Wl,--strip-all"
+    "-Wl,--exclude-libs,ALL", "-Wl,--gc-sections", "-Wl,--icf=all", "-Wl,--strip-all", "-Wl,--pack-dyn-relocs=android"
 )
 
 android {

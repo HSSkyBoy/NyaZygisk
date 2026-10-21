@@ -4,7 +4,8 @@
 #include <algorithm>  // For std::sort
 #include <cerrno>     // For errno
 #include <cstring>    // For strerror
-#include <fstream>    // For std::ifstream
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,8 +66,9 @@ std::vector<mount_info> parse_mount_info(const char* pid) {
     path += pid;
     path += "/mountinfo";
 
-    std::ifstream file(path);
-    if (!file.is_open()) {
+    // fopen/getline instead of std::ifstream: iostreams pull libc++'s locale into the binary.
+    FILE* file = fopen(path.c_str(), "re");
+    if (file == nullptr) {
         PLOGE("open %s", path.c_str());
         return {};
     }
@@ -78,7 +80,12 @@ std::vector<mount_info> parse_mount_info(const char* pid) {
     // 150 is a reasonable estimate for the number of mounts on an Android system
     result.reserve(150); 
 
-    while (std::getline(file, line)) {
+    char* raw_line = nullptr;
+    size_t raw_cap = 0;
+    ssize_t raw_len;
+    while ((raw_len = getline(&raw_line, &raw_cap, file)) != -1) {
+        if (raw_len > 0 && raw_line[raw_len - 1] == '\n') raw_len--;
+        line.assign(raw_line, raw_len);
         size_t separator_pos = line.find(" - ");
         if (separator_pos == std::string::npos) {
             LOGE("malformed line (no ' - ' separator): %s", line.c_str());
@@ -118,6 +125,8 @@ std::vector<mount_info> parse_mount_info(const char* pid) {
 
         result.push_back(std::move(info));
     }
+    free(raw_line);
+    fclose(file);
     return result;
 }
 

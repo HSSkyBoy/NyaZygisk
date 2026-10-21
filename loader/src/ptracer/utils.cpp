@@ -19,8 +19,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ios>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -174,12 +172,12 @@ bool set_regs(int pid, struct user_regs_struct &regs) {
 std::string get_addr_mem_region(const std::vector<MapInfo> &info, uintptr_t addr) {
     for (const auto &map : info) {
         if (map.start <= addr && map.end > addr) {
-            std::ostringstream ss;
-            ss << map.path << " ";
-            ss << ((map.perms & PROT_READ) ? 'r' : '-');
-            ss << ((map.perms & PROT_WRITE) ? 'w' : '-');
-            ss << ((map.perms & PROT_EXEC) ? 'x' : '-');
-            return ss.str();
+            std::string result = map.path;
+            result += ' ';
+            result += (map.perms & PROT_READ) ? 'r' : '-';
+            result += (map.perms & PROT_WRITE) ? 'w' : '-';
+            result += (map.perms & PROT_EXEC) ? 'x' : '-';
+            return result;
         }
     }
     return "<unknown>";
@@ -720,21 +718,26 @@ void wait_for_trace(int pid, int *status, int flags) {
 }
 
 std::string parse_status(int status) {
-    std::ostringstream os;
-    os << "0x" << std::hex << status << std::dec << " ";
+    char head[24];
+    snprintf(head, sizeof(head), "0x%x ", status);
+    std::string os = head;
+    char buf[96];
     if (WIFEXITED(status)) {
-        os << "exited with " << WEXITSTATUS(status);
+        snprintf(buf, sizeof(buf), "exited with %d", WEXITSTATUS(status));
+        os += buf;
     } else if (WIFSIGNALED(status)) {
-        os << "signaled with " << sigabbrev_np(WTERMSIG(status)) << "(" << WTERMSIG(status) << ")";
+        snprintf(buf, sizeof(buf), "signaled with %s(%d)", sigabbrev_np(WTERMSIG(status)),
+                 WTERMSIG(status));
+        os += buf;
     } else if (WIFSTOPPED(status)) {
-        os << "stopped by ";
         auto stop_sig = WSTOPSIG(status);
-        os << "signal=" << sigabbrev_np(stop_sig) << "(" << stop_sig << "),";
-        os << "event=" << parse_ptrace_event(status);
+        snprintf(buf, sizeof(buf), "stopped by signal=%s(%d),event=%s", sigabbrev_np(stop_sig),
+                 stop_sig, parse_ptrace_event(status));
+        os += buf;
     } else {
-        os << "unknown";
+        os += "unknown";
     }
-    return os.str();
+    return os;
 }
 
 /**
