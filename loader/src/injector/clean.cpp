@@ -24,6 +24,7 @@
 #endif
 
 #include "atexit.hpp"
+#include "cfi.hpp"
 #include "fossil.hpp"
 #include "logging.hpp"
 #include "solist.hpp"
@@ -219,6 +220,39 @@ bool restore_cfi_shadow(const SavedCfiShadow &saved) {
     }
     LOGV("cfi-shadow: restored %zu bytes at %p", byte_len, reinterpret_cast<void *>(dst));
     return true;
+}
+
+void register_cfi_unchecked(uintptr_t base, size_t size) {
+    if (base == 0 || size == 0) return;
+
+    CfiShadowRange shadow;
+    if (!find_cfi_shadow(&shadow)) return;  // device/process without cross-DSO CFI
+
+    uintptr_t end = base + size - 1;
+    uintptr_t dst = shadow.start + cfi_shadow_offset(base);
+    uintptr_t dst_end = shadow.start + cfi_shadow_offset(end) + kCfiShadowEntrySize;
+    if (dst < shadow.start || dst_end > shadow.end || dst_end <= dst) {
+        LOGE("cfi-shadow: module range outside shadow map");
+        return;
+    }
+
+    size_t pg = page_size();
+    uintptr_t prot_start = page_down(dst, pg);
+    uintptr_t prot_end = page_up(dst_end, pg);
+    bool reprotect = (shadow.prot & PROT_WRITE) == 0;
+    if (reprotect && mprotect(reinterpret_cast<void *>(prot_start), prot_end - prot_start,
+                              shadow.prot | PROT_WRITE) != 0) {
+        LOGE("cfi-shadow: make writable failed");
+        return;
+    }
+
+    int changed = linker::CfiMarkUncheckedRange(shadow.start, shadow.end, base, size);
+
+    if (reprotect)
+        mprotect(reinterpret_cast<void *>(prot_start), prot_end - prot_start, shadow.prot);
+
+    LOGV("cfi-shadow: marked %d granule(s) unchecked for [%p, %p]", changed,
+         reinterpret_cast<void *>(base), reinterpret_cast<void *>(base + size));
 }
 
 struct MapRange {

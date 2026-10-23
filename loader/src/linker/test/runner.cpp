@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "cfi.hpp"
 #include "linker.hpp"
 
 #ifdef SEGV_DIAG
@@ -177,6 +178,33 @@ int ExerciseSystem(const char* path) {
     return 0;
 }
 
+// Unit test for the pure CFI-shadow slot logic (no live CFI runtime needed).
+// A fake shadow buffer stands in for "[anon:cfi shadow]" covering address 0 up,
+// so small synthetic module addresses index into the first few slots.
+void TestCfiShadow() {
+    printf("== cfi shadow slot logic\n");
+    uint16_t shadow[8] = {0};
+    auto start = reinterpret_cast<uintptr_t>(shadow);
+    auto end = start + sizeof(shadow);
+
+    // A real library already owns granule 2 (shadow value >= 2 encodes __cfi_check).
+    shadow[2] = 7;
+
+    // Module spanning granules 1..2 (base 256 KiB, size 512 KiB).
+    uintptr_t base = 1u << linker::kCfiShadowGranularity;
+    size_t size = 2u << linker::kCfiShadowGranularity;
+    int changed = linker::CfiMarkUncheckedRange(start, end, base, size);
+
+    Check("granule 1 (was invalid) -> unchecked", shadow[1] == linker::kCfiUncheckedShadow);
+    Check("granule 2 (real library) left intact", shadow[2] == 7);
+    Check("granule 0 untouched", shadow[0] == linker::kCfiInvalidShadow);
+    Check("only the one invalid granule changed", changed == 1);
+
+    // Out-of-shadow range is a no-op.
+    int oob = linker::CfiMarkUncheckedRange(start, end, base, 64u << linker::kCfiShadowGranularity);
+    Check("range past shadow end -> no change", oob == 0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -188,6 +216,7 @@ int main(int argc, char** argv) {
         printf("usage: %s <test_lib.so> [more.so ...]\n", argv[0]);
         return 2;
     }
+    TestCfiShadow();
     for (int i = 1; i < argc; i++) {
         ExerciseSystem(argv[i]);
         ExerciseCustom(argv[i], /*anonymous=*/true);

@@ -42,7 +42,7 @@ for arch in "${archs[@]}"; do
     "$cc" -std=c++23 -fno-rtti -Wall -Wextra -static-libstdc++ \
         -I"$INCLUDE_DIR" -I"$LINKER_DIR" \
         "$HERE/runner.cpp" \
-        "$LINKER_DIR/linker.cpp" "$LINKER_DIR/relocate.cpp" "$LINKER_DIR/interpose.cpp" \
+        "$LINKER_DIR/linker.cpp" "$LINKER_DIR/relocate.cpp" "$LINKER_DIR/interpose.cpp" "$LINKER_DIR/cfi.cpp" \
         -llog -o "$OUT/$arch-runner"
 
     # Stage into the rootfs and run under chroot (qemu-user handles aarch64).

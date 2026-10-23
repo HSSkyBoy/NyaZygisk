@@ -40,6 +40,11 @@ struct SavedCfiShadow {
 SavedCfiShadow backup_cfi_shadow(uintptr_t base, size_t size);
 bool restore_cfi_shadow(const SavedCfiShadow &saved);
 
+// Mark [base, base+size) as kUncheckedShadow in the CFI shadow, so cross-DSO CFI
+// checks that land in a module we mapped ourselves (which bionic never
+// registered) are allowed instead of aborting. No-op when no CFI shadow exists.
+void register_cfi_unchecked(uintptr_t base, size_t size);
+
 int spoof_virtual_maps(const char *path_substr, bool private_only = true);
 int spoof_fd_maps(int fd, bool private_only = true);
 int spoof_loaded_object_maps(uintptr_t address, bool private_only = true);

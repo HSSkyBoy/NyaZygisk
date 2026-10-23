@@ -18,6 +18,10 @@ void *Dlopen(int memfd, const char *name, bool *via_system) {
     linker::LoadError err = linker::LoadError::kNone;
     if (void *h = linker::Dlopen(memfd, name, anonymous, &err)) {
         *via_system = false;
+        // bionic never registered this module in the CFI shadow; mark its range
+        // unchecked so cross-DSO CFI calls that land in it (e.g. a hook) pass.
+        auto *img = static_cast<linker::Image *>(h);
+        register_cfi_unchecked(img->map_start(), img->size());
         LOGI("modloader: %s loaded by custom linker", name ? name : "(module)");
         return h;
     }
