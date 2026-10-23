@@ -367,6 +367,25 @@ bool Image::ParseDynamic(LoadError *err) {
 
     plt_is_rela_ = (plt_rel_type == DT_RELA);
 
+    // Derive the dynamic-symbol count for reverse (address -> symbol) lookup.
+    // sysv .hash stores it directly as nchain; GNU hash needs the max symbol
+    // index across buckets, then its chain walked to the terminator bit.
+    if (sysv_bucket_ != nullptr) {
+        dynsym_count_ = sysv_nchain_;
+    } else if (has_gnu_hash_ && gnu_nbucket_ > 0) {
+        uint32_t max_idx = gnu_symndx_;
+        for (size_t i = 0; i < gnu_nbucket_; i++) {
+            if (gnu_bucket_[i] > max_idx) max_idx = gnu_bucket_[i];
+        }
+        if (max_idx >= gnu_symndx_) {
+            uint32_t idx = max_idx;
+            while ((gnu_chain_[idx] & 1) == 0) idx++;
+            dynsym_count_ = idx + 1;
+        } else {
+            dynsym_count_ = gnu_symndx_;
+        }
+    }
+
     // Second pass for DT_NEEDED now that strtab_ is valid.
     for (const ElfW(Dyn) *d = dynamic_; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_NEEDED) {
@@ -449,6 +468,28 @@ void *Image::Symbol(const char *name) const {
     // Mirror dlsym: an exported ifunc resolves to the address its resolver picks.
     if (ELF_ST_TYPE(s->st_info) == STT_GNU_IFUNC) addr = CallIfuncResolver(addr);
     return reinterpret_cast<void *>(addr);
+}
+
+const char *Image::AddrToSym(const void *addr, void **out_saddr) const {
+    auto a = reinterpret_cast<uintptr_t>(addr);
+    if (a < map_start_ || a >= map_start_ + map_size_ || dynsym_count_ == 0) return nullptr;
+    ElfW(Addr) target = a - load_bias_;  // back to a module vaddr
+
+    const char *best_name = nullptr;
+    ElfW(Addr) best_val = 0;
+    for (size_t i = 0; i < dynsym_count_; i++) {
+        const ElfW(Sym) &s = symtab_[i];
+        if (s.st_shndx == SHN_UNDEF || s.st_name == 0) continue;
+        unsigned t = ELF_ST_TYPE(s.st_info);
+        if (t != STT_FUNC && t != STT_OBJECT && t != STT_GNU_IFUNC) continue;
+        if (s.st_value > target) continue;         // symbol starts after addr
+        if (best_name != nullptr && s.st_value < best_val) continue;  // farther back
+        best_val = s.st_value;
+        best_name = strtab_ + s.st_name;
+    }
+    if (best_name == nullptr) return nullptr;
+    if (out_saddr != nullptr) *out_saddr = reinterpret_cast<void *>(load_bias_ + best_val);
+    return best_name;
 }
 
 // --------------------------------------------------------------------------

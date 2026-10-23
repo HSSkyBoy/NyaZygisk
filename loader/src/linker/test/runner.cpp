@@ -160,6 +160,9 @@ int ExerciseCustom(const char* path, bool anonymous) {
     auto who = Sym<const char* (*)()>(h, "tl_who_am_i", true);
     Check("dladdr self reports our name", who && strstr(who(), "test_lib.so") != nullptr,
           who ? who() : "");
+    auto whosym = Sym<const char* (*)()>(h, "tl_who_sym", true);
+    Check("dladdr reverse-resolves the symbol name",
+          whosym && strcmp(whosym(), "tl_get42") == 0, whosym ? whosym() : "");
 
     // Maps footprint: anonymous mode must leave no file/memfd name on the
     // module's mapping; file-backed mode shows the fd path.

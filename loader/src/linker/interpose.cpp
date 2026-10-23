@@ -56,12 +56,17 @@ int MyDladdr(const void *addr, Dl_info *info) {
     Image *img = FindImageByAddress(addr);
     if (img == nullptr) return dladdr(addr, info);
 
-    // Synthesize a minimal Dl_info. We do not expose per-symbol names (the
-    // module is meant to be opaque); fname/fbase are enough for unwinding and
-    // for the common "which library am I in" query.
+    // Synthesize a Dl_info: fname/fbase name the image, and a reverse symbol
+    // lookup fills sname/saddr when a defined symbol precedes the address —
+    // what a module's own dladdr(self) call expects for logging/backtraces.
     memset(info, 0, sizeof(*info));
     info->dli_fname = img->name().c_str();
     info->dli_fbase = reinterpret_cast<void *>(img->base());
+    void *saddr = nullptr;
+    if (const char *sname = img->AddrToSym(addr, &saddr)) {
+        info->dli_sname = sname;
+        info->dli_saddr = saddr;
+    }
     return 1;
 }
 

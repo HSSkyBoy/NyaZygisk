@@ -52,6 +52,11 @@ public:
     // Resolve an exported symbol, mirroring dlsym(handle, name) semantics.
     void *Symbol(const char *name) const;
 
+    // Reverse lookup for dladdr: the nearest defined symbol at or before `addr`.
+    // Returns its name (into our strtab) and, via out_saddr, its runtime
+    // address; nullptr if none or `addr` is outside this image.
+    const char *AddrToSym(const void *addr, void **out_saddr) const;
+
     uintptr_t base() const { return load_bias_; }
     size_t size() const { return map_size_; }
     uintptr_t map_start() const { return map_start_; }
@@ -114,6 +119,8 @@ private:
     const uint32_t *sysv_chain_ = nullptr;
     size_t sysv_nbucket_ = 0;
     size_t sysv_nchain_ = 0;
+
+    size_t dynsym_count_ = 0;  // number of entries in symtab_, for reverse lookup
 
     // Relocation tables.
     const ElfW(Rela) *rela_ = nullptr;

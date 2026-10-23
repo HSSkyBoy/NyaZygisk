@@ -96,4 +96,14 @@ const char* tl_who_am_i() {
     return "(none)";
 }
 
+// dladdr reverse symbol lookup: the name for &tl_get42 should be "tl_get42".
+const char* tl_who_sym() {
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (dladdr(reinterpret_cast<void*>(&tl_get42), &info) && info.dli_sname) {
+        return info.dli_sname;
+    }
+    return "(none)";
+}
+
 }  // extern "C"
