@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -188,7 +189,69 @@ struct TestModuleAbi {
     long api_version;
     void (*onLoad)(void* api, void* env);
     int (*result)();
+    int (*throw_catch)();
 };
+
+// B8 experiment: register a hidden module's .eh_frame FDEs with the process
+// unwinder (libc.so __register_frame), so the external shared-libc++ unwinder
+// can find them even though the module is not in solist. Walks the module's
+// PT_GNU_EH_FRAME (.eh_frame_hdr) to locate .eh_frame, then __register_frame
+// per FDE. Returns the number of FDEs registered.
+int RegisterFrames(linker::Image* img) {
+    static auto reg = reinterpret_cast<void (*)(const void*)>(dlsym(RTLD_DEFAULT, "__register_frame"));
+    if (!reg) return -1;
+
+    const ElfW(Phdr)* phdr = img->phdr();
+    uintptr_t bias = img->base();
+    const uint8_t* ehf = nullptr;
+    for (size_t i = 0; i < img->phnum(); i++) {
+        if (phdr[i].p_type == PT_GNU_EH_FRAME) {
+            ehf = reinterpret_cast<const uint8_t*>(bias + phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (!ehf) return 0;
+
+    // .eh_frame_hdr: version, eh_frame_ptr_enc, fde_count_enc, table_enc, then
+    // the encoded eh_frame_ptr. Handle the encodings lld actually emits.
+    uint8_t ptr_enc = ehf[1];
+    const uint8_t* p = ehf + 4;
+    uintptr_t eh_frame = 0;
+    if (ptr_enc == 0x1b) {  // DW_EH_PE_pcrel | DW_EH_PE_sdata4
+        int32_t v;
+        memcpy(&v, p, 4);
+        eh_frame = reinterpret_cast<uintptr_t>(p) + v;
+    } else if (ptr_enc == 0x03) {  // DW_EH_PE_udata4 absolute
+        uint32_t v;
+        memcpy(&v, p, 4);
+        eh_frame = v;
+    } else if (ptr_enc == 0x00) {  // DW_EH_PE_absptr
+        memcpy(&eh_frame, p, sizeof(eh_frame));
+    } else {
+        printf("  (unhandled eh_frame_ptr enc 0x%02x)\n", ptr_enc);
+        return 0;
+    }
+
+    // Walk .eh_frame: each record is [u32 length][u32 CIE_id]...; length 0 ends;
+    // CIE_id 0 => CIE, else => FDE (register it).
+    auto* q = reinterpret_cast<const uint8_t*>(eh_frame);
+    int n = 0;
+    for (;;) {
+        uint32_t len;
+        memcpy(&len, q, 4);
+        if (len == 0) break;
+        if (len == 0xffffffffu) break;  // 64-bit length: not emitted here
+        const uint8_t* record = q;
+        uint32_t cie_id;
+        memcpy(&cie_id, q + 4, 4);
+        if (cie_id != 0) {
+            reg(record);
+            n++;
+        }
+        q += 4 + len;
+    }
+    return n;
+}
 
 // Load a module-shaped .so (exports zygisk_module_entry, links shared libc++)
 // and drive its entry the way the real loader would, then verify its result.
@@ -215,6 +278,28 @@ int ExerciseModule(const char* path, bool anonymous) {
         if (abi->onLoad) abi->onLoad(nullptr, nullptr);
         Check("onLoad vtable+STL+cross-DSO new/delete via shared libc++ (result 13)",
               abi->result && abi->result() == 13);
+
+        // B8 (documented limitation): a C++ exception in a shared-libc++ module
+        // needs the external unwinder to find this hidden module's FDEs.
+        // __register_frame populates libunwind's FDE cache, but bionic's
+        // exception path only consults it after dl_iterate_phdr/_dl_find_object
+        // locates the module — which it cannot, since we are not in solist — so
+        // the throw still terminates. Run it in a child so it does not kill the
+        // runner. This guards the known behaviour: if the child ever catches
+        // (exit 0), the limitation was fixed and this check flips to FAIL.
+        pid_t pid = fork();
+        if (pid == 0) {
+            RegisterFrames(static_cast<linker::Image*>(h));
+            int r = abi->throw_catch ? abi->throw_catch() : -99;
+            _exit(r == 7 ? 0 : 1);
+        }
+        int st = 0;
+        waitpid(pid, &st, 0);
+        // "Caught" means the child exited cleanly with 0. Anything else (killed
+        // by SIGABRT natively, or exit 134 when qemu-user translates that abort)
+        // is the limitation holding. If this ever reports caught, the fix landed.
+        bool caught = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        Check("shared-libc++ exception not caught (known limitation)", !caught);
     }
 
     uintptr_t base = static_cast<linker::Image*>(h)->map_start();

@@ -47,6 +47,7 @@ struct TestModuleAbi {
     long api_version;
     void (*onLoad)(void* api, void* env);
     int (*result)();
+    int (*throw_catch)();
 };
 
 static void ModOnLoad(void* /*api*/, void* /*env*/) {
@@ -64,11 +65,24 @@ static void ModOnLoad(void* /*api*/, void* /*env*/) {
 
 static int ModResult() { return g_result; }
 
+// Throws and catches entirely within the module. With shared libc++ this needs
+// the external unwinder to find this module's FDEs — it works only once the
+// loader has registered them (B8). Returns 7 on a successful catch.
+static int ModThrowCatch() {
+    try {
+        throw 123;
+    } catch (int v) {
+        return v == 123 ? 7 : -1;
+    }
+    return -2;
+}
+
 // The exported entry a real loader would dlsym.
 __attribute__((visibility("default"))) TestModuleAbi zygisk_module_entry = {
     /*api_version=*/5,
     /*onLoad=*/ModOnLoad,
     /*result=*/ModResult,
+    /*throw_catch=*/ModThrowCatch,
 };
 
 }  // extern "C"
