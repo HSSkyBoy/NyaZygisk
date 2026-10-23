@@ -5,12 +5,18 @@
 #include "dl.hpp"
 #include "linker.hpp"
 #include "logging.hpp"
+#include "zygisk.hpp"
 
 namespace modloader {
 
 void *Dlopen(int memfd, const char *name, bool *via_system) {
+    // Map into anonymous memory (no memfd trace in /proc/self/maps) when the
+    // device/config allows anonymous executable memory; otherwise map
+    // file-backed from the memfd, matching the regular loader's behaviour where
+    // execmem is denied.
+    const bool anonymous = is_anonymous_memory_enabled();
     linker::LoadError err = linker::LoadError::kNone;
-    if (void *h = linker::Dlopen(memfd, name, &err)) {
+    if (void *h = linker::Dlopen(memfd, name, anonymous, &err)) {
         *via_system = false;
         LOGI("modloader: %s loaded by custom linker", name ? name : "(module)");
         return h;

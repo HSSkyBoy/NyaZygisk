@@ -79,15 +79,44 @@ T Sym(void* h, const char* name, bool custom) {
     return reinterpret_cast<T>(custom ? linker::Dlsym(h, name) : dlsym(h, name));
 }
 
-int ExerciseCustom(const char* path) {
-    printf("== custom linker: %s\n", path);
+// Return the pathname column of the /proc/self/maps line covering `addr`,
+// or "" if that VMA is anonymous (nameless). Used to prove the hiding path.
+static std::string MapsPathAt(uintptr_t addr) {
+    FILE* m = fopen("/proc/self/maps", "re");
+    if (!m) return "";
+    char line[512];
+    std::string path;
+    while (fgets(line, sizeof(line), m)) {
+        unsigned long lo = 0, hi = 0;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) != 2) continue;
+        if (addr < lo || addr >= hi) continue;
+        // pathname is the 6th field; a '/' or '[' marks a named mapping.
+        char* nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        const char* p = line;
+        int fields = 0;
+        while (*p && fields < 5) {
+            while (*p == ' ') p++;
+            while (*p && *p != ' ') p++;
+            fields++;
+        }
+        while (*p == ' ') p++;
+        path = p;
+        break;
+    }
+    fclose(m);
+    return path;
+}
+
+int ExerciseCustom(const char* path, bool anonymous) {
+    printf("== custom linker (%s): %s\n", anonymous ? "anonymous" : "file-backed", path);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         printf("  cannot open %s\n", path);
         return 1;
     }
     linker::LoadError err = linker::LoadError::kNone;
-    void* h = linker::Dlopen(fd, "test_lib.so", &err);
+    void* h = linker::Dlopen(fd, "test_lib.so", anonymous, &err);
     close(fd);
     if (h == nullptr) {
         printf("  Dlopen failed (err=%d)\n", static_cast<int>(err));
@@ -116,6 +145,16 @@ int ExerciseCustom(const char* path) {
     auto who = Sym<const char* (*)()>(h, "tl_who_am_i", true);
     Check("dladdr self reports our name", who && strstr(who(), "test_lib.so") != nullptr,
           who ? who() : "");
+
+    // Maps footprint: anonymous mode must leave no file/memfd name on the
+    // module's mapping; file-backed mode shows the fd path.
+    uintptr_t base = static_cast<linker::Image*>(h)->map_start();
+    std::string mpath = MapsPathAt(base);
+    if (anonymous) {
+        Check("anonymous: no path in maps", mpath.empty(), mpath.c_str());
+    } else {
+        Check("file-backed: path present in maps", !mpath.empty(), mpath.c_str());
+    }
 
     bool closed = linker::Dlclose(h);
     Check("Dlclose + destructors", closed);
@@ -151,7 +190,8 @@ int main(int argc, char** argv) {
     }
     for (int i = 1; i < argc; i++) {
         ExerciseSystem(argv[i]);
-        ExerciseCustom(argv[i]);
+        ExerciseCustom(argv[i], /*anonymous=*/true);
+        ExerciseCustom(argv[i], /*anonymous=*/false);
     }
     printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
     return g_failures == 0 ? 0 : 1;

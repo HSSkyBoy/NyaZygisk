@@ -36,8 +36,13 @@ class Image {
 public:
     // Map and fully relocate the module backed by `fd` (e.g. a memfd). `name`
     // is only used for logging and for the synthetic dladdr/dl_iterate_phdr
-    // identity. Returns nullptr on failure, with `err` set.
-    static Image *Load(int fd, const char *name, LoadError *err);
+    // identity. When `anonymous` is true the segments are read into private
+    // anonymous memory (pread), so the fd never appears in /proc/self/maps —
+    // this is the hiding path, and it needs anonymous-executable memory
+    // (execmem). When false the segments are mmap'd file-backed from `fd`,
+    // which shows the memfd name in maps but works where execmem is denied.
+    // Returns nullptr on failure, with `err` set.
+    static Image *Load(int fd, const char *name, bool anonymous, LoadError *err);
 
     ~Image();
 
@@ -64,7 +69,7 @@ private:
     Image() = default;
 
     bool MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(Phdr)> &phdrs,
-                     LoadError *err);
+                     bool anonymous, LoadError *err);
     bool ParseDynamic(LoadError *err);
     bool Relocate(LoadError *err);
     void Protect();
@@ -141,7 +146,7 @@ private:
 // Public entry points used by the module loaders (module.cpp / zn_loader.cpp).
 // Load a module from an fd; on success returns an opaque handle usable with the
 // functions below. On kUnsupported the caller may retry with android_dlopen_ext.
-void *Dlopen(int fd, const char *name, LoadError *err);
+void *Dlopen(int fd, const char *name, bool anonymous, LoadError *err);
 void *Dlsym(void *handle, const char *name);
 bool Dlclose(void *handle);
 bool IsOurHandle(void *handle);

@@ -37,6 +37,23 @@ int ToProt(ElfW(Word) p_flags) {
     return prot;
 }
 
+// pread the whole [off, off+len) range into `dst`, tolerating short reads.
+bool PreadFull(int fd, void *dst, size_t len, off_t off) {
+    auto *p = static_cast<uint8_t *>(dst);
+    while (len > 0) {
+        ssize_t n = pread(fd, p, len, off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;  // unexpected EOF
+        p += n;
+        off += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
 // Registry of images we loaded, so Dlsym/Dlclose/IsOurHandle and the dladdr
 // interpose can map an address or handle back to an Image.
 std::mutex g_images_lock;
@@ -49,7 +66,7 @@ std::vector<Image *> g_images;
 // --------------------------------------------------------------------------
 
 bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(Phdr)> &phdrs,
-                        LoadError *err) {
+                        bool anonymous, LoadError *err) {
     const size_t pg = PageSize();
 
     // The reservation must honour the maximum p_align across loadable segments
@@ -96,13 +113,36 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
     map_size_ = span;
     load_bias_ = aligned - min_vaddr;
 
-    // Map each PT_LOAD: file-backed pages read in, .bss remains zero-fill.
+    // Fill each PT_LOAD. Two strategies (see Load's `anonymous` doc):
+    //   anonymous: the reservation is already private-anonymous; just make each
+    //     segment writable and pread the file bytes in. .bss stays zero because
+    //     anonymous pages are zero-filled, and the fd never shows in maps.
+    //   file-backed: mmap each segment from `fd` (memfd), then hand-zero the
+    //     .bss tail that shares the last file page.
     for (const auto &ph : phdrs) {
         if (ph.p_type != PT_LOAD) continue;
 
         uintptr_t seg_start = load_bias_ + PageStart(ph.p_vaddr, pg);
         uintptr_t seg_file_end = load_bias_ + ph.p_vaddr + ph.p_filesz;
         uintptr_t seg_mem_end = load_bias_ + PageEnd(ph.p_vaddr + ph.p_memsz, pg);
+
+        if (anonymous) {
+            // The reservation covers this range as PROT_NONE; open it for writing.
+            if (mprotect(reinterpret_cast<void *>(seg_start), seg_mem_end - seg_start,
+                         PROT_READ | PROT_WRITE) != 0) {
+                LOGE("linker: segment mprotect failed for %s: %s", name_.c_str(), strerror(errno));
+                *err = LoadError::kError;
+                return false;
+            }
+            if (ph.p_filesz > 0 &&
+                !PreadFull(fd, reinterpret_cast<void *>(load_bias_ + ph.p_vaddr), ph.p_filesz,
+                           static_cast<off_t>(ph.p_offset))) {
+                LOGE("linker: segment pread failed for %s: %s", name_.c_str(), strerror(errno));
+                *err = LoadError::kError;
+                return false;
+            }
+            continue;
+        }
 
         // Map the file portion writable (we relocate before Protect()).
         uintptr_t file_page_end = PageEnd(seg_file_end, pg);
@@ -617,7 +657,7 @@ void Image::CallDestructors() {
 // Load / destroy
 // --------------------------------------------------------------------------
 
-Image *Image::Load(int fd, const char *name, LoadError *err) {
+Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
     *err = LoadError::kNone;
 
     ElfW(Ehdr) ehdr;
@@ -653,7 +693,7 @@ Image *Image::Load(int fd, const char *name, LoadError *err) {
     auto *img = new Image();
     img->name_ = name ? name : "(anonymous)";
 
-    if (!img->MapSegments(fd, ehdr, phdrs, err) || !img->ParseDynamic(err) ||
+    if (!img->MapSegments(fd, ehdr, phdrs, anonymous, err) || !img->ParseDynamic(err) ||
         !img->Relocate(err)) {
         delete img;  // ~Image unmaps whatever was mapped.
         return nullptr;
@@ -683,9 +723,9 @@ Image::~Image() {
 // Public C-ish API + interpose support
 // --------------------------------------------------------------------------
 
-void *Dlopen(int fd, const char *name, LoadError *err) {
+void *Dlopen(int fd, const char *name, bool anonymous, LoadError *err) {
     LoadError local = LoadError::kNone;
-    Image *img = Image::Load(fd, name, err ? err : &local);
+    Image *img = Image::Load(fd, name, anonymous, err ? err : &local);
     return img;
 }
 
