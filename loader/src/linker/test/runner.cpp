@@ -183,6 +183,48 @@ int ExerciseCustom(const char* path, bool anonymous) {
     return 0;
 }
 
+// Mirror of mod_lib.cpp's exported ABI (leading fields only).
+struct TestModuleAbi {
+    long api_version;
+    void (*onLoad)(void* api, void* env);
+    int (*result)();
+};
+
+// Load a module-shaped .so (exports zygisk_module_entry, links shared libc++)
+// and drive its entry the way the real loader would, then verify its result.
+int ExerciseModule(const char* path, bool anonymous) {
+    printf("== module (%s): %s\n", anonymous ? "anonymous" : "file-backed", path);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("  cannot open %s\n", path);
+        return 1;
+    }
+    linker::LoadError err = linker::LoadError::kNone;
+    void* h = linker::Dlopen(fd, "mod_lib.so", anonymous, &err);
+    close(fd);
+    if (h == nullptr) {
+        printf("  Dlopen failed (err=%d)\n", static_cast<int>(err));
+        g_failures++;
+        return 1;
+    }
+
+    auto* abi = static_cast<TestModuleAbi*>(linker::Dlsym(h, "zygisk_module_entry"));
+    Check("exports zygisk_module_entry", abi != nullptr);
+    if (abi) {
+        Check("entry api_version == 5", abi->api_version == 5);
+        if (abi->onLoad) abi->onLoad(nullptr, nullptr);
+        Check("onLoad vtable+STL+cross-DSO new/delete via shared libc++ (result 13)",
+              abi->result && abi->result() == 13);
+    }
+
+    uintptr_t base = static_cast<linker::Image*>(h)->map_start();
+    std::string mpath = MapsPathAt(base);
+    if (anonymous) Check("module anonymous: no path in maps", mpath.empty(), mpath.c_str());
+
+    Check("module Dlclose", linker::Dlclose(h));
+    return 0;
+}
+
 int ExerciseSystem(const char* path) {
     printf("== system linker (baseline): %s\n", path);
     void* h = dlopen(path, RTLD_NOW);
@@ -237,6 +279,17 @@ int main(int argc, char** argv) {
         printf("usage: %s <test_lib.so> [more.so ...]\n", argv[0]);
         return 2;
     }
+    // `--module f.so ...` drives module-shaped libs; otherwise the args are
+    // test_lib variants exercised symbol-by-symbol.
+    if (strcmp(argv[1], "--module") == 0) {
+        for (int i = 2; i < argc; i++) {
+            ExerciseModule(argv[i], /*anonymous=*/true);
+            ExerciseModule(argv[i], /*anonymous=*/false);
+        }
+        printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
+
     TestCfiShadow();
     for (int i = 1; i < argc; i++) {
         ExerciseSystem(argv[i]);

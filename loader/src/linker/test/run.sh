@@ -37,6 +37,12 @@ for arch in "${archs[@]}"; do
     "$cc" -shared -fPIC -std=c++20 -static-libstdc++ \
         -Wl,--pack-dyn-relocs=none "$HERE/test_lib.cpp" -o "$OUT/$arch-plain.so"
 
+    # Module-shaped lib linked against SHARED libc++ (DT_NEEDED libc++_shared.so),
+    # staged into the rootfs so the system linker can resolve it for the module's
+    # cross-DSO C++. Exercises what the static-libstdc++ test_lib cannot.
+    "$cc" -shared -fPIC -std=c++20 \
+        "$HERE/mod_lib.cpp" -o "$OUT/$arch-mod.so"
+
     # Runner: compile the linker sources straight in (static lib equivalent).
     # static-libstdc++ so the chroot needs no libc++_shared.so.
     "$cc" -std=c++23 -fno-rtti -Wall -Wextra -static-libstdc++ \
@@ -49,7 +55,7 @@ for arch in "${archs[@]}"; do
     dst="$rootfs/data/local/tmp"
     mkdir -p "$dst"
     cp "$OUT/$arch-runner" "$dst/runner"
-    cp "$OUT/$arch-aps2.so" "$OUT/$arch-relr64k.so" "$OUT/$arch-plain.so" "$dst/"
+    cp "$OUT/$arch-aps2.so" "$OUT/$arch-relr64k.so" "$OUT/$arch-plain.so" "$OUT/$arch-mod.so" "$dst/"
     mountpoint -q "$rootfs/proc" || mount -t proc proc "$rootfs/proc"
     mountpoint -q "$rootfs/dev" || mount --bind /dev "$rootfs/dev"
 
@@ -57,4 +63,7 @@ for arch in "${archs[@]}"; do
         /data/local/tmp/$arch-plain.so \
         /data/local/tmp/$arch-aps2.so \
         /data/local/tmp/$arch-relr64k.so
+
+    echo "---- module-shaped (shared libc++) ----"
+    chroot "$rootfs" /data/local/tmp/runner --module /data/local/tmp/$arch-mod.so
 done
