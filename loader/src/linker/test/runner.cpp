@@ -70,6 +70,14 @@ namespace {
 
 int g_failures = 0;
 
+// Records the ids reported by the module's static-object destructors, so the
+// runner can confirm they actually ran (and in reverse order) on Dlclose.
+int g_dtor_seq[8];
+int g_dtor_n = 0;
+void DtorSink(int id) {
+    if (g_dtor_n < 8) g_dtor_seq[g_dtor_n++] = id;
+}
+
 void Check(const char* what, bool ok, const char* detail = "") {
     printf("  [%s] %s %s\n", ok ? "PASS" : "FAIL", what, detail);
     if (!ok) g_failures++;
@@ -157,8 +165,16 @@ int ExerciseCustom(const char* path, bool anonymous) {
         Check("file-backed: path present in maps", !mpath.empty(), mpath.c_str());
     }
 
+    // Arm the destructor probe, then close: the static dtors must run (via
+    // __on_dlclose -> __cxa_finalize) in reverse construction order.
+    auto set_cb = Sym<void (*)(void (*)(int))>(h, "tl_set_dtor_cb", true);
+    if (set_cb) set_cb(DtorSink);
+    g_dtor_n = 0;
+
     bool closed = linker::Dlclose(h);
-    Check("Dlclose + destructors", closed);
+    Check("Dlclose succeeds", closed);
+    Check("static destructors ran in reverse order",
+          g_dtor_n == 2 && g_dtor_seq[0] == 2 && g_dtor_seq[1] == 1);
     return 0;
 }
 

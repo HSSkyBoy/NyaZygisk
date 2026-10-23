@@ -44,6 +44,23 @@ static Ctor1 g1;
 static Ctor2 g2;
 const char* tl_ctor_order() { return g_order.c_str(); }
 
+// --- destructor execution on unload ---------------------------------------
+// Static-object dtors are registered via __cxa_atexit(&__dso_handle) at
+// construction and only run when __on_dlclose (in .fini_array) calls
+// __cxa_finalize. They report through a host-provided callback so the runner
+// can observe them AFTER the module is closed (the write happens before munmap).
+static void (*g_dtor_cb)(int) = nullptr;
+void tl_set_dtor_cb(void (*cb)(int)) { g_dtor_cb = cb; }
+struct DtorProbe {
+    int id;
+    explicit DtorProbe(int i) : id(i) {}
+    ~DtorProbe() {
+        if (g_dtor_cb) g_dtor_cb(id);
+    }
+};
+static DtorProbe g_probe_a(1);
+static DtorProbe g_probe_b(2);
+
 // --- C++ exceptions (unwinding must find our eh_frame) --------------------
 int tl_throw_catch() {
     try {
