@@ -44,6 +44,14 @@ ElfW(Addr) CallIfuncResolver(uintptr_t resolver_addr) {
     return reinterpret_cast<ElfW(Addr) (*)()>(resolver_addr)();
 }
 
+uintptr_t AlignUp(uintptr_t v, uintptr_t a) { return (v + a - 1) & ~(a - 1); }
+
+uint32_t ReadU32(const uint8_t *p) {
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 // pread the whole [off, off+len) range into `dst`, tolerating short reads.
 bool PreadFull(int fd, void *dst, size_t len, off_t off) {
     auto *p = static_cast<uint8_t *>(dst);
@@ -205,6 +213,16 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
                                                              (ehdr.e_phoff - ph.p_offset));
                 break;
             }
+        }
+    }
+
+    // Does the module opt into AArch64 BTI? Only then may we add PROT_BTI to its
+    // executable segments; doing so on a module without landing pads would fault.
+    for (const auto &ph : phdrs) {
+        if (ph.p_type == PT_GNU_PROPERTY) {
+            wants_bti_ = GnuPropertyNoteHasBti(
+                reinterpret_cast<const uint8_t *>(load_bias_ + ph.p_vaddr), ph.p_memsz);
+            break;
         }
     }
     return true;
@@ -628,11 +646,10 @@ void Image::SetSegmentProtections() {
         uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
         int prot = ToProt(phdr_[i].p_flags);
 #if defined(__aarch64__)
-        // Apply BTI to executable segments that advertise it. The GNU property
-        // note parsing is deferred; for now mirror the system linker by adding
-        // PROT_BTI when the segment is executable and the image opted in via
-        // the note (handled in a follow-up). Left as plain exec for the
-        // skeleton to avoid faulting on non-BTI modules.
+        // Enforce BTI on executable segments only when the module advertised it
+        // (GNU_PROPERTY_AARCH64_FEATURE_1_BTI); adding PROT_BTI to code without
+        // landing pads would fault indirect branches into it.
+        if (wants_bti_ && (prot & PROT_EXEC)) prot |= PROT_BTI;
 #endif
         // Writable segments keep PROT_WRITE here so relocations (and the RELRO
         // region, which lives inside a PF_W segment) can still be written; the
@@ -810,6 +827,39 @@ Image *FindImageByAddress(const void *addr) {
 void ForEachImage(void (*fn)(Image *, void *), void *arg) {
     std::lock_guard<std::mutex> lk(g_images_lock);
     for (auto *i : g_images) fn(i, arg);
+}
+
+bool GnuPropertyNoteHasBti(const uint8_t *note, size_t size) {
+    const uint8_t *p = note;
+    const uint8_t *end = note + size;
+    while (p + 12 <= end) {
+        uint32_t namesz = ReadU32(p);
+        uint32_t descsz = ReadU32(p + 4);
+        uint32_t ntype = ReadU32(p + 8);
+        const uint8_t *name = p + 12;
+        const uint8_t *desc = name + AlignUp(namesz, 4);
+        if (desc > end) break;
+
+        if (ntype == NT_GNU_PROPERTY_TYPE_0 && namesz == 4 && memcmp(name, "GNU", 4) == 0) {
+            const uint8_t *pp = desc;
+            const uint8_t *pend = desc + descsz;
+            if (pend > end) pend = end;
+            // Each property: pr_type (u32), pr_datasz (u32), data, padded to a
+            // pointer-size boundary (8 on LP64).
+            while (pp + 8 <= pend) {
+                uint32_t pr_type = ReadU32(pp);
+                uint32_t pr_datasz = ReadU32(pp + 4);
+                const uint8_t *pr_data = pp + 8;
+                if (pr_data + pr_datasz > pend) break;
+                if (pr_type == GNU_PROPERTY_AARCH64_FEATURE_1_AND && pr_datasz >= 4) {
+                    if (ReadU32(pr_data) & GNU_PROPERTY_AARCH64_FEATURE_1_BTI) return true;
+                }
+                pp = pr_data + AlignUp(pr_datasz, sizeof(ElfW(Addr)));
+            }
+        }
+        p = desc + AlignUp(descsz, 4);
+    }
+    return false;
 }
 
 }  // namespace linker

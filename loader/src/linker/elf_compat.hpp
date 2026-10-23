@@ -44,6 +44,24 @@
 #define STT_GNU_IFUNC 10
 #endif
 
+// GNU property note (PT_GNU_PROPERTY) and the AArch64 BTI feature bit, used to
+// decide whether a module's executable segments may take PROT_BTI.
+#ifndef PT_GNU_PROPERTY
+#define PT_GNU_PROPERTY 0x6474e553
+#endif
+#ifndef NT_GNU_PROPERTY_TYPE_0
+#define NT_GNU_PROPERTY_TYPE_0 5
+#endif
+#ifndef GNU_PROPERTY_AARCH64_FEATURE_1_AND
+#define GNU_PROPERTY_AARCH64_FEATURE_1_AND 0xc0000000
+#endif
+#ifndef GNU_PROPERTY_AARCH64_FEATURE_1_BTI
+#define GNU_PROPERTY_AARCH64_FEATURE_1_BTI 1
+#endif
+#ifndef PROT_BTI
+#define PROT_BTI 0x10
+#endif
+
 // APS2 packed relocations.
 #ifndef DT_ANDROID_REL
 #define DT_ANDROID_REL 0x6000000f

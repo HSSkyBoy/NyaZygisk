@@ -353,6 +353,29 @@ void TestCfiShadow() {
     Check("range past shadow end -> no change", oob == 0);
 }
 
+// Unit test for the GNU-property BTI parser with a synthetic note (arch-neutral).
+void TestBtiParse() {
+    printf("== gnu property BTI parse\n");
+    auto make = [](uint32_t feat, uint8_t* out) -> size_t {
+        auto w = [&](size_t off, uint32_t v) { memcpy(out + off, &v, 4); };
+        w(0, 4);                                   // namesz
+        w(4, 16);                                  // descsz
+        w(8, NT_GNU_PROPERTY_TYPE_0);              // type
+        memcpy(out + 12, "GNU", 4);                // name
+        w(16, GNU_PROPERTY_AARCH64_FEATURE_1_AND); // pr_type
+        w(20, 4);                                  // pr_datasz
+        w(24, feat);                               // feature bits
+        w(28, 0);                                  // padding to 8
+        return 32;
+    };
+    uint8_t buf[64] = {0};
+    size_t n = make(GNU_PROPERTY_AARCH64_FEATURE_1_BTI, buf);
+    Check("note with BTI bit -> detected", linker::GnuPropertyNoteHasBti(buf, n));
+    n = make(0, buf);  // PAC only / no BTI
+    Check("note without BTI bit -> not detected", !linker::GnuPropertyNoteHasBti(buf, n));
+    Check("empty note -> not detected", !linker::GnuPropertyNoteHasBti(buf, 0));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -376,6 +399,7 @@ int main(int argc, char** argv) {
     }
 
     TestCfiShadow();
+    TestBtiParse();
     for (int i = 1; i < argc; i++) {
         ExerciseSystem(argv[i]);
         ExerciseCustom(argv[i], /*anonymous=*/true);

@@ -139,6 +139,7 @@ private:
     ElfW(Addr) *fini_array_ = nullptr;
     size_t fini_array_count_ = 0;
     bool constructors_called_ = false;
+    bool wants_bti_ = false;  // module advertises AArch64 BTI via GNU property
 
     // DT_NEEDED: resolved lazily through the system linker, kept for dlclose.
     std::vector<std::string> needed_names_;
@@ -159,5 +160,9 @@ bool IsOurHandle(void *handle);
 // Internal helpers shared with interpose.cpp. Not part of the module-facing API.
 Image *FindImageByAddress(const void *addr);
 void ForEachImage(void (*fn)(Image *, void *), void *arg);
+
+// Parse a .note.gnu.property note (the contents a PT_GNU_PROPERTY segment
+// points at) and report whether it advertises AArch64 BTI. Exposed for tests.
+bool GnuPropertyNoteHasBti(const uint8_t *note, size_t size);
 
 }  // namespace linker

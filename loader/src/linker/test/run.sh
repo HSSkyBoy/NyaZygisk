@@ -43,6 +43,14 @@ for arch in "${archs[@]}"; do
     "$cc" -shared -fPIC -std=c++20 \
         "$HERE/mod_lib.cpp" -o "$OUT/$arch-mod.so"
 
+    # AArch64 BTI variant: advertises GNU_PROPERTY_AARCH64_FEATURE_1_BTI, so the
+    # loader adds PROT_BTI to its text. Confirms detection + that a BTI module
+    # still loads and runs.
+    if [ "$arch" = "aarch64" ]; then
+        "$cc" -shared -fPIC -std=c++20 -mbranch-protection=standard \
+            "$HERE/mod_lib.cpp" -o "$OUT/$arch-mod-bti.so"
+    fi
+
     # Runner: compile the linker sources straight in (static lib equivalent).
     # static-libstdc++ so the chroot needs no libc++_shared.so.
     "$cc" -std=c++23 -fno-rtti -Wall -Wextra -static-libstdc++ \
@@ -56,6 +64,7 @@ for arch in "${archs[@]}"; do
     mkdir -p "$dst"
     cp "$OUT/$arch-runner" "$dst/runner"
     cp "$OUT/$arch-aps2.so" "$OUT/$arch-relr64k.so" "$OUT/$arch-plain.so" "$OUT/$arch-mod.so" "$dst/"
+    [ -f "$OUT/$arch-mod-bti.so" ] && cp "$OUT/$arch-mod-bti.so" "$dst/"
     mountpoint -q "$rootfs/proc" || mount -t proc proc "$rootfs/proc"
     mountpoint -q "$rootfs/dev" || mount --bind /dev "$rootfs/dev"
 
@@ -65,5 +74,7 @@ for arch in "${archs[@]}"; do
         /data/local/tmp/$arch-relr64k.so
 
     echo "---- module-shaped (shared libc++) ----"
-    chroot "$rootfs" /data/local/tmp/runner --module /data/local/tmp/$arch-mod.so
+    mods="/data/local/tmp/$arch-mod.so"
+    [ -f "$OUT/$arch-mod-bti.so" ] && mods="$mods /data/local/tmp/$arch-mod-bti.so"
+    chroot "$rootfs" /data/local/tmp/runner --module $mods
 done
