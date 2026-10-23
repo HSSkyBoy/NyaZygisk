@@ -1,0 +1,749 @@
+#include "linker.hpp"
+
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <cstring>
+#include <mutex>
+#include <vector>
+
+#include "elf_compat.hpp"
+#include "interpose.hpp"
+#include "logging.hpp"
+#include "reloc_arch.hpp"
+#include "relocate.hpp"
+
+namespace linker {
+
+namespace {
+
+size_t PageSize() {
+    static size_t pg = []() {
+        long v = sysconf(_SC_PAGESIZE);
+        return v > 0 ? static_cast<size_t>(v) : 4096;
+    }();
+    return pg;
+}
+
+uintptr_t PageStart(uintptr_t addr, size_t pg) { return addr & ~(static_cast<uintptr_t>(pg) - 1); }
+uintptr_t PageEnd(uintptr_t addr, size_t pg) { return PageStart(addr + pg - 1, pg); }
+
+int ToProt(ElfW(Word) p_flags) {
+    int prot = 0;
+    if (p_flags & PF_R) prot |= PROT_READ;
+    if (p_flags & PF_W) prot |= PROT_WRITE;
+    if (p_flags & PF_X) prot |= PROT_EXEC;
+    return prot;
+}
+
+// Registry of images we loaded, so Dlsym/Dlclose/IsOurHandle and the dladdr
+// interpose can map an address or handle back to an Image.
+std::mutex g_images_lock;
+std::vector<Image *> g_images;
+
+}  // namespace
+
+// --------------------------------------------------------------------------
+// Mapping
+// --------------------------------------------------------------------------
+
+bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(Phdr)> &phdrs,
+                        LoadError *err) {
+    const size_t pg = PageSize();
+
+    // The reservation must honour the maximum p_align across loadable segments
+    // (riscv64 ships 64 KiB-aligned segments), not just the system page size.
+    size_t max_align = pg;
+    uintptr_t min_vaddr = UINTPTR_MAX;
+    uintptr_t max_vaddr = 0;
+    for (const auto &ph : phdrs) {
+        if (ph.p_type != PT_LOAD) continue;
+        if (ph.p_align > max_align) max_align = ph.p_align;
+        if (ph.p_vaddr < min_vaddr) min_vaddr = ph.p_vaddr;
+        if (ph.p_vaddr + ph.p_memsz > max_vaddr) max_vaddr = ph.p_vaddr + ph.p_memsz;
+    }
+    if (min_vaddr == UINTPTR_MAX) {
+        LOGE("linker: no PT_LOAD segments in %s", name_.c_str());
+        *err = LoadError::kError;
+        return false;
+    }
+
+    min_vaddr = PageStart(min_vaddr, pg);
+    max_vaddr = PageEnd(max_vaddr, pg);
+    size_t span = max_vaddr - min_vaddr;
+
+    // Over-reserve by one alignment unit so we can align the base up inside the
+    // reservation, then trim the slack on both sides.
+    size_t reserve = span + max_align;
+    void *raw = mmap(nullptr, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (raw == MAP_FAILED) {
+        LOGE("linker: reservation mmap failed for %s: %s", name_.c_str(), strerror(errno));
+        *err = LoadError::kError;
+        return false;
+    }
+
+    uintptr_t raw_addr = reinterpret_cast<uintptr_t>(raw);
+    uintptr_t aligned = (raw_addr + max_align - 1) & ~(static_cast<uintptr_t>(max_align) - 1);
+    // Trim front slack.
+    if (aligned != raw_addr) munmap(raw, aligned - raw_addr);
+    // Trim back slack.
+    uintptr_t tail = aligned + span;
+    uintptr_t raw_end = raw_addr + reserve;
+    if (raw_end > tail) munmap(reinterpret_cast<void *>(tail), raw_end - tail);
+
+    map_start_ = aligned;
+    map_size_ = span;
+    load_bias_ = aligned - min_vaddr;
+
+    // Map each PT_LOAD: file-backed pages read in, .bss remains zero-fill.
+    for (const auto &ph : phdrs) {
+        if (ph.p_type != PT_LOAD) continue;
+
+        uintptr_t seg_start = load_bias_ + PageStart(ph.p_vaddr, pg);
+        uintptr_t seg_file_end = load_bias_ + ph.p_vaddr + ph.p_filesz;
+        uintptr_t seg_mem_end = load_bias_ + PageEnd(ph.p_vaddr + ph.p_memsz, pg);
+
+        // Map the file portion writable (we relocate before Protect()).
+        uintptr_t file_page_end = PageEnd(seg_file_end, pg);
+        if (ph.p_filesz > 0) {
+            off_t file_off = static_cast<off_t>(PageStart(ph.p_offset, pg));
+            size_t len = file_page_end - seg_start;
+            void *m = mmap(reinterpret_cast<void *>(seg_start), len, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_FIXED, fd, file_off);
+            if (m == MAP_FAILED) {
+                LOGE("linker: segment mmap failed for %s: %s", name_.c_str(), strerror(errno));
+                *err = LoadError::kError;
+                return false;
+            }
+            // Zero the .bss bytes that share the last file-backed page with
+            // initialized data: everything from filesz to the end of that page.
+            // This must run whenever the segment has memsz beyond filesz — even
+            // when the whole .bss fits inside this page (seg_mem_end ==
+            // file_page_end). The old `seg_mem_end > file_page_end` guard
+            // skipped that case, leaving file bytes in .bss (e.g. a zero-init
+            // global reading back as the lld version string).
+            if (ph.p_memsz > ph.p_filesz && file_page_end > seg_file_end) {
+                memset(reinterpret_cast<void *>(seg_file_end), 0, file_page_end - seg_file_end);
+            }
+        }
+
+        // Remaining whole .bss pages: anonymous zero fill.
+        if (seg_mem_end > file_page_end) {
+            size_t bss_len = seg_mem_end - file_page_end;
+            void *m = mmap(reinterpret_cast<void *>(file_page_end), bss_len,
+                           PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            if (m == MAP_FAILED) {
+                LOGE("linker: bss mmap failed for %s: %s", name_.c_str(), strerror(errno));
+                *err = LoadError::kError;
+                return false;
+            }
+        }
+    }
+
+    // Locate the program headers in the mapped image (for dl_iterate_phdr).
+    phnum_ = ehdr.e_phnum;
+    for (const auto &ph : phdrs) {
+        if (ph.p_type == PT_PHDR) {
+            phdr_ = reinterpret_cast<const ElfW(Phdr) *>(load_bias_ + ph.p_vaddr);
+            break;
+        }
+    }
+    if (phdr_ == nullptr) {
+        // Fall back to finding phdrs inside a PT_LOAD by file offset.
+        for (const auto &ph : phdrs) {
+            if (ph.p_type == PT_LOAD && ph.p_offset <= ehdr.e_phoff &&
+                ehdr.e_phoff < ph.p_offset + ph.p_filesz) {
+                phdr_ = reinterpret_cast<const ElfW(Phdr) *>(load_bias_ + ph.p_vaddr +
+                                                             (ehdr.e_phoff - ph.p_offset));
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+// --------------------------------------------------------------------------
+// Dynamic section
+// --------------------------------------------------------------------------
+
+bool Image::ParseDynamic(LoadError *err) {
+    // Find PT_DYNAMIC from the mapped phdrs.
+    for (size_t i = 0; i < phnum_; i++) {
+        if (phdr_[i].p_type == PT_DYNAMIC) {
+            dynamic_ = reinterpret_cast<const ElfW(Dyn) *>(load_bias_ + phdr_[i].p_vaddr);
+        }
+        if (phdr_[i].p_type == PT_GNU_RELRO) {
+            // Recorded for Protect(); nothing to do here.
+        }
+    }
+    if (dynamic_ == nullptr) {
+        LOGE("linker: no PT_DYNAMIC in %s", name_.c_str());
+        *err = LoadError::kError;
+        return false;
+    }
+
+    const ElfW(Addr) bias = load_bias_;
+    size_t plt_rel_type = 0;
+
+    for (const ElfW(Dyn) *d = dynamic_; d->d_tag != DT_NULL; d++) {
+        switch (d->d_tag) {
+            case DT_STRTAB:
+                strtab_ = reinterpret_cast<const char *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_SYMTAB:
+                symtab_ = reinterpret_cast<const ElfW(Sym) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_GNU_HASH: {
+                auto *h = reinterpret_cast<const uint32_t *>(bias + d->d_un.d_ptr);
+                gnu_nbucket_ = h[0];
+                gnu_symndx_ = h[1];
+                gnu_maskwords_ = h[2];
+                gnu_shift2_ = h[3];
+                gnu_bloom_ = reinterpret_cast<const ElfW(Addr) *>(h + 4);
+                gnu_bucket_ = reinterpret_cast<const uint32_t *>(gnu_bloom_ + gnu_maskwords_);
+                gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
+                has_gnu_hash_ = true;
+                break;
+            }
+            case DT_HASH: {
+                auto *h = reinterpret_cast<const uint32_t *>(bias + d->d_un.d_ptr);
+                sysv_nbucket_ = h[0];
+                sysv_nchain_ = h[1];
+                sysv_bucket_ = h + 2;
+                sysv_chain_ = sysv_bucket_ + sysv_nbucket_;
+                break;
+            }
+            case DT_RELA:
+                rela_ = reinterpret_cast<const ElfW(Rela) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_RELASZ:
+                rela_count_ = d->d_un.d_val / sizeof(ElfW(Rela));
+                break;
+            case DT_REL:
+                rel_ = reinterpret_cast<const ElfW(Rel) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_RELSZ:
+                rel_count_ = d->d_un.d_val / sizeof(ElfW(Rel));
+                break;
+            case DT_JMPREL:
+                plt_rel_ = reinterpret_cast<const uint8_t *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_PLTRELSZ:
+                plt_rel_size_ = d->d_un.d_val;
+                break;
+            case DT_PLTREL:
+                plt_rel_type = d->d_un.d_val;
+                break;
+            case DT_ANDROID_RELA:
+            case DT_ANDROID_REL:
+                android_rel_ = reinterpret_cast<const uint8_t *>(bias + d->d_un.d_ptr);
+                android_is_rela_ = (d->d_tag == DT_ANDROID_RELA);
+                break;
+            case DT_ANDROID_RELASZ:
+            case DT_ANDROID_RELSZ:
+                android_rel_size_ = d->d_un.d_val;
+                break;
+            case DT_RELR:
+            case DT_ANDROID_RELR:
+                relr_ = reinterpret_cast<const ElfW(Relr) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_RELRSZ:
+            case DT_ANDROID_RELRSZ:
+                relr_count_ = d->d_un.d_val / sizeof(ElfW(Relr));
+                break;
+            case DT_INIT:
+                init_func_ = reinterpret_cast<void (*)()>(bias + d->d_un.d_ptr);
+                break;
+            case DT_FINI:
+                fini_func_ = reinterpret_cast<void (*)()>(bias + d->d_un.d_ptr);
+                break;
+            case DT_INIT_ARRAY:
+                init_array_ = reinterpret_cast<ElfW(Addr) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_INIT_ARRAYSZ:
+                init_array_count_ = d->d_un.d_val / sizeof(ElfW(Addr));
+                break;
+            case DT_FINI_ARRAY:
+                fini_array_ = reinterpret_cast<ElfW(Addr) *>(bias + d->d_un.d_ptr);
+                break;
+            case DT_FINI_ARRAYSZ:
+                fini_array_count_ = d->d_un.d_val / sizeof(ElfW(Addr));
+                break;
+            case DT_FLAGS:
+                if (d->d_un.d_val & DF_BIND_NOW) bind_now_ = true;
+                if (d->d_un.d_val & DF_TEXTREL) {
+                    LOGW("linker: %s has DF_TEXTREL, refusing", name_.c_str());
+                    *err = LoadError::kUnsupported;
+                    return false;
+                }
+                break;
+            case DT_FLAGS_1:
+                if (d->d_un.d_val & DF_1_NOW) bind_now_ = true;
+                break;
+            case DT_TEXTREL:
+                LOGW("linker: %s has DT_TEXTREL, refusing", name_.c_str());
+                *err = LoadError::kUnsupported;
+                return false;
+            case DT_NEEDED:
+                // Resolved after strtab is known; record the offset for now by
+                // stashing the string pointer below.
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (strtab_ == nullptr || symtab_ == nullptr) {
+        LOGE("linker: %s missing strtab/symtab", name_.c_str());
+        *err = LoadError::kError;
+        return false;
+    }
+
+    plt_is_rela_ = (plt_rel_type == DT_RELA);
+
+    // Second pass for DT_NEEDED now that strtab_ is valid.
+    for (const ElfW(Dyn) *d = dynamic_; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_NEEDED) {
+            needed_names_.emplace_back(strtab_ + d->d_un.d_val);
+        }
+    }
+
+    return true;
+}
+
+// --------------------------------------------------------------------------
+// Symbol lookup within this image
+// --------------------------------------------------------------------------
+
+static uint32_t GnuHash(const char *name) {
+    uint32_t h = 5381;
+    for (const uint8_t *p = reinterpret_cast<const uint8_t *>(name); *p != 0; p++) {
+        h += (h << 5) + *p;
+    }
+    return h;
+}
+
+static uint32_t SysvHash(const char *name) {
+    uint32_t h = 0, g;
+    for (const uint8_t *p = reinterpret_cast<const uint8_t *>(name); *p != 0; p++) {
+        h = (h << 4) + *p;
+        g = h & 0xf0000000;
+        h ^= g;
+        h ^= g >> 24;
+    }
+    return h;
+}
+
+// Find an exported, defined symbol by name. Returns the Sym or nullptr.
+static const ElfW(Sym) *
+    LookupInImage(const ElfW(Sym) * symtab, const char *strtab, const char *name,
+                  bool has_gnu, const uint32_t *gnu_bucket, const uint32_t *gnu_chain,
+                  size_t gnu_nbucket, uint32_t gnu_symndx, uint32_t gnu_maskwords,
+                  uint32_t gnu_shift2, const ElfW(Addr) *gnu_bloom, const uint32_t *sysv_bucket,
+                  const uint32_t *sysv_chain, size_t sysv_nbucket) {
+    if (has_gnu) {
+        uint32_t hash = GnuHash(name);
+        constexpr uint32_t kBits = sizeof(ElfW(Addr)) * 8;
+        ElfW(Addr) word = gnu_bloom[(hash / kBits) % gnu_maskwords];
+        ElfW(Addr) mask = (static_cast<ElfW(Addr)>(1) << (hash % kBits)) |
+                          (static_cast<ElfW(Addr)>(1) << ((hash >> gnu_shift2) % kBits));
+        if ((word & mask) != mask) return nullptr;
+
+        uint32_t n = gnu_bucket[hash % gnu_nbucket];
+        if (n < gnu_symndx) return nullptr;
+        do {
+            if ((gnu_chain[n] | 1) == (hash | 1)) {
+                const ElfW(Sym) *s = &symtab[n];
+                if (s->st_shndx != SHN_UNDEF && strcmp(strtab + s->st_name, name) == 0) {
+                    return s;
+                }
+            }
+        } while ((gnu_chain[n++] & 1) == 0);
+        return nullptr;
+    }
+
+    if (sysv_bucket != nullptr) {
+        uint32_t hash = SysvHash(name);
+        for (uint32_t n = sysv_bucket[hash % sysv_nbucket]; n != 0; n = sysv_chain[n]) {
+            const ElfW(Sym) *s = &symtab[n];
+            if (s->st_shndx != SHN_UNDEF && strcmp(strtab + s->st_name, name) == 0) {
+                return s;
+            }
+        }
+    }
+    return nullptr;
+}
+
+void *Image::Symbol(const char *name) const {
+    const ElfW(Sym) *s = LookupInImage(
+        symtab_, strtab_, name, has_gnu_hash_, gnu_bucket_, gnu_chain_, gnu_nbucket_, gnu_symndx_,
+        gnu_maskwords_, gnu_shift2_, gnu_bloom_, sysv_bucket_, sysv_chain_, sysv_nbucket_);
+    if (s == nullptr) return nullptr;
+    return reinterpret_cast<void *>(load_bias_ + s->st_value);
+}
+
+// --------------------------------------------------------------------------
+// Symbol resolution for relocations
+// --------------------------------------------------------------------------
+
+void *Image::ResolveSymbol(const char *name, bool *is_weak_undef) const {
+    *is_weak_undef = false;
+
+    // 1. Interpose table (dl_iterate_phdr, dladdr, dlsym, dlclose, ...).
+    if (void *ov = InterposeLookup(name)) return ov;
+
+    // 2. This image itself (Bsymbolic-style: a module's own static libc++ must
+    //    bind to itself, not to a same-named symbol elsewhere).
+    if (void *self = Symbol(name)) return self;
+
+    // 3. DT_NEEDED libraries, in order, through the system linker.
+    for (void *h : needed_handles_) {
+        if (h == nullptr) continue;
+        if (void *sym = dlsym(h, name)) return sym;
+    }
+
+    // 4. Global default scope.
+    if (void *sym = dlsym(RTLD_DEFAULT, name)) return sym;
+
+    *is_weak_undef = true;
+    return nullptr;
+}
+
+// --------------------------------------------------------------------------
+// Relocation
+// --------------------------------------------------------------------------
+
+bool Image::Relocate(LoadError *err) {
+    // Resolve DT_NEEDED up front (eager); they are nearly always already
+    // resident in Zygote, so RTLD_NOLOAD succeeds without touching solist.
+    for (const auto &n : needed_names_) {
+        void *h = dlopen(n.c_str(), RTLD_NOW | RTLD_NOLOAD);
+        if (h == nullptr) h = dlopen(n.c_str(), RTLD_NOW);
+        if (h == nullptr) {
+            LOGW("linker: %s needs %s which is not loadable: %s", name_.c_str(), n.c_str(),
+                 dlerror());
+        }
+        needed_handles_.push_back(h);
+    }
+
+    bool ok = true;
+
+    auto apply = [&](ElfW(Addr) offset, uint64_t info, int64_t addend) {
+        uint32_t type = RELOC_R_TYPE(info);
+        uint32_t sym = RELOC_R_SYM(info);
+        auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + offset);
+
+        auto where_addr = reinterpret_cast<uintptr_t>(where);
+        if (where_addr < map_start_ || where_addr >= map_start_ + map_size_) {
+            LOGE("linker: %s relocation target %p out of mapped range [%p,%p), type=%u",
+                 name_.c_str(), where, reinterpret_cast<void *>(map_start_),
+                 reinterpret_cast<void *>(map_start_ + map_size_), type);
+            *err = LoadError::kError;
+            ok = false;
+            return;
+        }
+
+        if (type == 0) return;
+
+        if (IsTlsReloc(type)) {
+            LOGW("linker: %s uses TLS relocation (type %u), refusing", name_.c_str(), type);
+            *err = LoadError::kUnsupported;
+            ok = false;
+            return;
+        }
+
+        if (type == RELOC_RELATIVE) {
+            *where = load_bias_ + addend;
+            return;
+        }
+        if (type == RELOC_IRELATIVE) {
+            auto resolver = reinterpret_cast<ElfW(Addr) (*)()>(load_bias_ + addend);
+            *where = resolver();
+            return;
+        }
+
+        // Symbol-based relocation.
+        const ElfW(Sym) *s = &symtab_[sym];
+        const char *sym_name = strtab_ + s->st_name;
+        ElfW(Addr) value = 0;
+
+        if (s->st_shndx != SHN_UNDEF && ELF_ST_BIND(s->st_info) == STB_LOCAL) {
+            value = load_bias_ + s->st_value;
+        } else {
+            bool weak_undef = false;
+            void *resolved = ResolveSymbol(sym_name, &weak_undef);
+            if (resolved == nullptr) {
+                if (ELF_ST_BIND(s->st_info) == STB_WEAK) {
+                    value = 0;  // Permitted: weak undefined resolves to 0.
+                } else {
+                    LOGE("linker: %s cannot resolve symbol '%s'", name_.c_str(), sym_name);
+                    *err = LoadError::kError;
+                    ok = false;
+                    return;
+                }
+            } else {
+                value = reinterpret_cast<ElfW(Addr)>(resolved);
+            }
+        }
+
+        switch (type) {
+            case RELOC_JUMP_SLOT:
+                // S only: on REL targets the in-place value is a PLT stub, not
+                // an addend; on RELA targets the addend is 0.
+                *where = value;
+                break;
+            case RELOC_GLOB_DAT:
+#if (RELOC_ABS) == (RELOC_GLOB_DAT)
+                // riscv64 folds GLOB_DAT and ABS into one type (R_RISCV_64),
+                // which carries an addend.
+                *where = value + addend;
+#else
+                *where = value;
+#endif
+                break;
+#if (RELOC_ABS) != (RELOC_GLOB_DAT)
+            case RELOC_ABS:
+                *where = value + addend;
+                break;
+#endif
+            default:
+                LOGE("linker: %s unsupported relocation type %u", name_.c_str(), type);
+                *err = LoadError::kUnsupported;
+                ok = false;
+                return;
+        }
+    };
+
+    // RELR first (relative-only, cheapest).
+    if (relr_ != nullptr && relr_count_ > 0) {
+        ForEachRelr(relr_, relr_count_, load_bias_,
+                    [&](ElfW(Addr) *w) { *w += load_bias_; });
+    }
+
+    // APS2 packed.
+    if (android_rel_ != nullptr && android_rel_size_ > 0) {
+        if (!ForEachPackedReloc(android_rel_, android_rel_size_, apply)) {
+            *err = LoadError::kError;
+            return false;
+        }
+        if (!ok) return false;
+    }
+
+    // Plain RELA.
+    for (size_t i = 0; i < rela_count_ && ok; i++) {
+        apply(rela_[i].r_offset, rela_[i].r_info, rela_[i].r_addend);
+    }
+    // Plain REL (implicit addend read from the slot).
+    for (size_t i = 0; i < rel_count_ && ok; i++) {
+        auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + rel_[i].r_offset);
+        apply(rel_[i].r_offset, rel_[i].r_info, static_cast<int64_t>(static_cast<intptr_t>(*where)));
+    }
+
+    // PLT relocations (JMPREL). With BIND_NOW these resolve eagerly; we always
+    // resolve them eagerly regardless, since we do not install a lazy resolver.
+    if (plt_rel_ != nullptr && plt_rel_size_ > 0 && ok) {
+        if (plt_is_rela_) {
+            auto *r = reinterpret_cast<const ElfW(Rela) *>(plt_rel_);
+            size_t n = plt_rel_size_ / sizeof(ElfW(Rela));
+            for (size_t i = 0; i < n && ok; i++) apply(r[i].r_offset, r[i].r_info, r[i].r_addend);
+        } else {
+            auto *r = reinterpret_cast<const ElfW(Rel) *>(plt_rel_);
+            size_t n = plt_rel_size_ / sizeof(ElfW(Rel));
+            for (size_t i = 0; i < n && ok; i++) {
+                auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + r[i].r_offset);
+                apply(r[i].r_offset, r[i].r_info,
+                      static_cast<int64_t>(static_cast<intptr_t>(*where)));
+            }
+        }
+    }
+
+    return ok;
+}
+
+// --------------------------------------------------------------------------
+// Protection + constructors
+// --------------------------------------------------------------------------
+
+void Image::Protect() {
+    const size_t pg = PageSize();
+    for (size_t i = 0; i < phnum_; i++) {
+        if (phdr_[i].p_type != PT_LOAD) continue;
+        uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
+        uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
+        int prot = ToProt(phdr_[i].p_flags);
+#if defined(__aarch64__)
+        // Apply BTI to executable segments that advertise it. The GNU property
+        // note parsing is deferred; for now mirror the system linker by adding
+        // PROT_BTI when the segment is executable and the image opted in via
+        // the note (handled in a follow-up). Left as plain exec for the
+        // skeleton to avoid faulting on non-BTI modules.
+#endif
+        mprotect(reinterpret_cast<void *>(start), end - start, prot);
+    }
+
+    // Re-apply read-only to PT_GNU_RELRO ranges.
+    for (size_t i = 0; i < phnum_; i++) {
+        if (phdr_[i].p_type != PT_GNU_RELRO) continue;
+        uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
+        uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
+        mprotect(reinterpret_cast<void *>(start), end - start, PROT_READ);
+    }
+
+    __builtin___clear_cache(reinterpret_cast<char *>(map_start_),
+                            reinterpret_cast<char *>(map_start_ + map_size_));
+}
+
+void Image::CallConstructors() {
+    if (constructors_called_) return;
+    constructors_called_ = true;
+    if (init_func_ != nullptr) init_func_();
+    for (size_t i = 0; i < init_array_count_; i++) {
+        auto fn = reinterpret_cast<void (*)()>(init_array_[i]);
+        if (fn != nullptr && fn != reinterpret_cast<void (*)()>(-1)) fn();
+    }
+}
+
+void Image::CallDestructors() {
+    if (!constructors_called_) return;
+    for (size_t i = fini_array_count_; i > 0; i--) {
+        auto fn = reinterpret_cast<void (*)()>(fini_array_[i - 1]);
+        if (fn != nullptr && fn != reinterpret_cast<void (*)()>(-1)) fn();
+    }
+    if (fini_func_ != nullptr) fini_func_();
+}
+
+// --------------------------------------------------------------------------
+// Load / destroy
+// --------------------------------------------------------------------------
+
+Image *Image::Load(int fd, const char *name, LoadError *err) {
+    *err = LoadError::kNone;
+
+    ElfW(Ehdr) ehdr;
+    if (pread(fd, &ehdr, sizeof(ehdr), 0) != static_cast<ssize_t>(sizeof(ehdr))) {
+        LOGE("linker: cannot read ELF header of %s", name);
+        *err = LoadError::kError;
+        return nullptr;
+    }
+    if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr.e_ident[EI_CLASS] != ELFCLASS_NATIVE || ehdr.e_type != ET_DYN) {
+        LOGE("linker: %s is not a native ET_DYN shared object", name);
+        *err = LoadError::kError;
+        return nullptr;
+    }
+
+    std::vector<ElfW(Phdr)> phdrs(ehdr.e_phnum);
+    if (pread(fd, phdrs.data(), ehdr.e_phnum * sizeof(ElfW(Phdr)), ehdr.e_phoff) !=
+        static_cast<ssize_t>(ehdr.e_phnum * sizeof(ElfW(Phdr)))) {
+        LOGE("linker: cannot read program headers of %s", name);
+        *err = LoadError::kError;
+        return nullptr;
+    }
+
+    // Refuse TLS up front, before committing any mapping.
+    for (const auto &ph : phdrs) {
+        if (ph.p_type == PT_TLS && ph.p_memsz > 0) {
+            LOGW("linker: %s has PT_TLS, refusing (needs system linker)", name);
+            *err = LoadError::kUnsupported;
+            return nullptr;
+        }
+    }
+
+    auto *img = new Image();
+    img->name_ = name ? name : "(anonymous)";
+
+    if (!img->MapSegments(fd, ehdr, phdrs, err) || !img->ParseDynamic(err) ||
+        !img->Relocate(err)) {
+        delete img;  // ~Image unmaps whatever was mapped.
+        return nullptr;
+    }
+
+    img->Protect();
+    img->CallConstructors();
+
+    {
+        std::lock_guard<std::mutex> lk(g_images_lock);
+        g_images.push_back(img);
+    }
+    return img;
+}
+
+Image::~Image() {
+    CallDestructors();
+    for (void *h : needed_handles_) {
+        if (h != nullptr) dlclose(h);
+    }
+    if (map_start_ != 0 && map_size_ != 0) {
+        munmap(reinterpret_cast<void *>(map_start_), map_size_);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Public C-ish API + interpose support
+// --------------------------------------------------------------------------
+
+void *Dlopen(int fd, const char *name, LoadError *err) {
+    LoadError local = LoadError::kNone;
+    Image *img = Image::Load(fd, name, err ? err : &local);
+    return img;
+}
+
+void *Dlsym(void *handle, const char *name) {
+    if (handle == nullptr) return nullptr;
+    auto *img = static_cast<Image *>(handle);
+    {
+        std::lock_guard<std::mutex> lk(g_images_lock);
+        bool known = false;
+        for (auto *i : g_images) {
+            if (i == img) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) return nullptr;
+    }
+    return img->Symbol(name);
+}
+
+bool Dlclose(void *handle) {
+    auto *img = static_cast<Image *>(handle);
+    {
+        std::lock_guard<std::mutex> lk(g_images_lock);
+        auto it = g_images.end();
+        for (auto i = g_images.begin(); i != g_images.end(); ++i) {
+            if (*i == img) {
+                it = i;
+                break;
+            }
+        }
+        if (it == g_images.end()) return false;
+        g_images.erase(it);
+    }
+    delete img;
+    return true;
+}
+
+bool IsOurHandle(void *handle) {
+    std::lock_guard<std::mutex> lk(g_images_lock);
+    for (auto *i : g_images) {
+        if (i == handle) return true;
+    }
+    return false;
+}
+
+// Used by interpose.cpp's dladdr override.
+Image *FindImageByAddress(const void *addr) {
+    std::lock_guard<std::mutex> lk(g_images_lock);
+    for (auto *i : g_images) {
+        if (i->Contains(addr)) return i;
+    }
+    return nullptr;
+}
+
+void ForEachImage(void (*fn)(Image *, void *), void *arg) {
+    std::lock_guard<std::mutex> lk(g_images_lock);
+    for (auto *i : g_images) fn(i, arg);
+}
+
+}  // namespace linker

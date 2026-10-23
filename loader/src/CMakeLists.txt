@@ -14,11 +14,18 @@ add_library(common STATIC ${COMMON_SRC_LIST})
 target_include_directories(common PRIVATE include external/lzma)
 target_link_libraries(common log lzma)
 
+# From-scratch module loader (keeps Zygisk/ZN modules out of the dynamic
+# linker's solist; see linker/linker.hpp).
+aux_source_directory(linker LINKER_SRC_LIST)
+add_library(modlinker STATIC ${LINKER_SRC_LIST})
+target_include_directories(modlinker PRIVATE include linker)
+target_link_libraries(modlinker log)
+
 aux_source_directory(injector INJECTOR_SRC_LIST)
 add_library(zygisk SHARED ${INJECTOR_SRC_LIST})
 target_compile_options(zygisk PRIVATE -Wno-invalid-offsetof -Wno-unused-private-field)
-target_include_directories(zygisk PRIVATE include external/lzma)
-target_link_libraries(zygisk log common lsplt_static lzma)
+target_include_directories(zygisk PRIVATE include external/lzma linker)
+target_link_libraries(zygisk log common modlinker lsplt_static lzma)
 if(NOT ANDROID_ABI STREQUAL "riscv64")
     target_include_directories(zygisk PRIVATE external/dobby/include)
     target_link_libraries(zygisk dobby)
