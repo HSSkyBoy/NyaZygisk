@@ -72,7 +72,12 @@ private:
                      bool anonymous, LoadError *err);
     bool ParseDynamic(LoadError *err);
     bool Relocate(LoadError *err);
-    void Protect();
+    // Final per-segment protections (text R-X, data RW, rodata R), applied
+    // BEFORE relocation so ifunc resolvers in the text segment are executable
+    // when Relocate calls them. Relocations only write to writable segments.
+    void SetSegmentProtections();
+    // RELRO -> read-only and instruction-cache flush, AFTER relocation.
+    void ApplyRelro();
     void CallConstructors();
     void CallDestructors();
 

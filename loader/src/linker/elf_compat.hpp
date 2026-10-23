@@ -39,6 +39,11 @@
 #define DT_ANDROID_RELRENT 0x6fffe003
 #endif
 
+// GNU indirect function symbol type (resolver chosen at load time).
+#ifndef STT_GNU_IFUNC
+#define STT_GNU_IFUNC 10
+#endif
+
 // APS2 packed relocations.
 #ifndef DT_ANDROID_REL
 #define DT_ANDROID_REL 0x6000000f

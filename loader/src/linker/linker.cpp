@@ -37,6 +37,13 @@ int ToProt(ElfW(Word) p_flags) {
     return prot;
 }
 
+// Call a GNU ifunc resolver and return the address it selects. bionic uses the
+// same no-argument cast; resolvers that read hwcap args tolerate the extra
+// registers being whatever they are.
+ElfW(Addr) CallIfuncResolver(uintptr_t resolver_addr) {
+    return reinterpret_cast<ElfW(Addr) (*)()>(resolver_addr)();
+}
+
 // pread the whole [off, off+len) range into `dst`, tolerating short reads.
 bool PreadFull(int fd, void *dst, size_t len, off_t off) {
     auto *p = static_cast<uint8_t *>(dst);
@@ -420,7 +427,10 @@ void *Image::Symbol(const char *name) const {
         symtab_, strtab_, name, has_gnu_hash_, gnu_bucket_, gnu_chain_, gnu_nbucket_, gnu_symndx_,
         gnu_maskwords_, gnu_shift2_, gnu_bloom_, sysv_bucket_, sysv_chain_, sysv_nbucket_);
     if (s == nullptr) return nullptr;
-    return reinterpret_cast<void *>(load_bias_ + s->st_value);
+    ElfW(Addr) addr = load_bias_ + s->st_value;
+    // Mirror dlsym: an exported ifunc resolves to the address its resolver picks.
+    if (ELF_ST_TYPE(s->st_info) == STT_GNU_IFUNC) addr = CallIfuncResolver(addr);
+    return reinterpret_cast<void *>(addr);
 }
 
 // --------------------------------------------------------------------------
@@ -498,8 +508,7 @@ bool Image::Relocate(LoadError *err) {
             return;
         }
         if (type == RELOC_IRELATIVE) {
-            auto resolver = reinterpret_cast<ElfW(Addr) (*)()>(load_bias_ + addend);
-            *where = resolver();
+            *where = CallIfuncResolver(load_bias_ + addend);
             return;
         }
 
@@ -508,9 +517,15 @@ bool Image::Relocate(LoadError *err) {
         const char *sym_name = strtab_ + s->st_name;
         ElfW(Addr) value = 0;
 
-        if (s->st_shndx != SHN_UNDEF && ELF_ST_BIND(s->st_info) == STB_LOCAL) {
+        if (s->st_shndx != SHN_UNDEF) {
+            // Defined in this module (local or global): resolve module-first to
+            // our own definition. For an ifunc, st_value is the resolver — call
+            // it, as bionic does for the relocating object.
             value = load_bias_ + s->st_value;
+            if (ELF_ST_TYPE(s->st_info) == STT_GNU_IFUNC) value = CallIfuncResolver(value);
         } else {
+            // Undefined here: resolve externally. dlsym already runs an ifunc
+            // resolver, so nothing extra to do for those.
             bool weak_undef = false;
             void *resolved = ResolveSymbol(sym_name, &weak_undef);
             if (resolved == nullptr) {
@@ -605,7 +620,7 @@ bool Image::Relocate(LoadError *err) {
 // Protection + constructors
 // --------------------------------------------------------------------------
 
-void Image::Protect() {
+void Image::SetSegmentProtections() {
     const size_t pg = PageSize();
     for (size_t i = 0; i < phnum_; i++) {
         if (phdr_[i].p_type != PT_LOAD) continue;
@@ -619,10 +634,15 @@ void Image::Protect() {
         // the note (handled in a follow-up). Left as plain exec for the
         // skeleton to avoid faulting on non-BTI modules.
 #endif
+        // Writable segments keep PROT_WRITE here so relocations (and the RELRO
+        // region, which lives inside a PF_W segment) can still be written; the
+        // RELRO range is sealed read-only later in ApplyRelro.
         mprotect(reinterpret_cast<void *>(start), end - start, prot);
     }
+}
 
-    // Re-apply read-only to PT_GNU_RELRO ranges.
+void Image::ApplyRelro() {
+    const size_t pg = PageSize();
     for (size_t i = 0; i < phnum_; i++) {
         if (phdr_[i].p_type != PT_GNU_RELRO) continue;
         uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
@@ -693,13 +713,19 @@ Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
     auto *img = new Image();
     img->name_ = name ? name : "(anonymous)";
 
-    if (!img->MapSegments(fd, ehdr, phdrs, anonymous, err) || !img->ParseDynamic(err) ||
-        !img->Relocate(err)) {
+    if (!img->MapSegments(fd, ehdr, phdrs, anonymous, err) || !img->ParseDynamic(err)) {
         delete img;  // ~Image unmaps whatever was mapped.
         return nullptr;
     }
 
-    img->Protect();
+    // Final protections (text R-X) BEFORE relocation, so ifunc resolvers the
+    // relocation pass may call are executable; then relocate, then seal RELRO.
+    img->SetSegmentProtections();
+    if (!img->Relocate(err)) {
+        delete img;
+        return nullptr;
+    }
+    img->ApplyRelro();
     img->CallConstructors();
 
     {

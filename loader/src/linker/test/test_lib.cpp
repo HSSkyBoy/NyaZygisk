@@ -76,6 +76,16 @@ int tl_throw_catch() {
 __attribute__((weak)) extern void tl_missing_weak(void);
 void* tl_weak_addr() { return reinterpret_cast<void*>(&tl_missing_weak); }
 
+// --- IFUNC ----------------------------------------------------------------
+// tl_ifunc is a GNU indirect function: its resolver returns the real impl's
+// address at load time. An internal call exercises the reloc-time path
+// (IRELATIVE or a symbol reloc into an STT_GNU_IFUNC); a dlsym of tl_ifunc
+// exercises Symbol()'s ifunc handling. Both must land on the impl (111).
+extern "C" int tl_ifunc_impl() { return 111; }
+extern "C" void* tl_ifunc_resolver() { return reinterpret_cast<void*>(&tl_ifunc_impl); }
+extern "C" int tl_ifunc(void) __attribute__((ifunc("tl_ifunc_resolver")));
+int tl_call_ifunc() { return tl_ifunc(); }
+
 // --- dladdr self lookup (goes through our interpose in the custom case) ----
 const char* tl_who_am_i() {
     Dl_info info;

@@ -151,6 +151,11 @@ int ExerciseCustom(const char* path, bool anonymous) {
     auto weak = Sym<void* (*)()>(h, "tl_weak_addr", true);
     Check("weak undefined resolves to 0", weak && weak() == nullptr);
 
+    auto callif = Sym<int (*)()>(h, "tl_call_ifunc", true);
+    Check("internal ifunc call resolves to impl", callif && callif() == 111);
+    auto ifsym = Sym<int (*)()>(h, "tl_ifunc", true);
+    Check("dlsym of ifunc resolves to impl", ifsym && ifsym() == 111);
+
     auto who = Sym<const char* (*)()>(h, "tl_who_am_i", true);
     Check("dladdr self reports our name", who && strstr(who(), "test_lib.so") != nullptr,
           who ? who() : "");
