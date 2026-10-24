@@ -25,7 +25,7 @@ using namespace std::string_view_literals;
 #ifdef WORK_DIRECTORY
 const char *const kWorkDirectory = STRINGIFY(WORK_DIRECTORY);
 #else
-const char *const kWorkDirectory = "/data/adb/neozygisk";
+const char *const kWorkDirectory = "/data/adb/nyazygisk";
 #endif
 
 // The main entry point for the monitoring process.

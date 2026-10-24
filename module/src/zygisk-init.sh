@@ -16,7 +16,10 @@ create_sys_perm() {
 TMP_PATH=@WORK_DIRECTORY@
 
 if [ -d "$TMP_PATH" ]; then
-  rm -rf "$TMP_PATH"
+  for item in "$TMP_PATH"/*; do
+    [ "$item" = "$TMP_PATH/config.prop" ] && continue
+    [ -e "$item" ] || [ -L "$item" ] || [ -S "$item" ] && rm -rf "$item"
+  done
 fi
 
 create_sys_perm "$TMP_PATH"

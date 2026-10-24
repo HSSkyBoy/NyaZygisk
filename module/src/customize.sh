@@ -131,6 +131,12 @@ ui_print "- Extracting WebUI files"
 unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH" >&2
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
+if [ -f "/data/adb/modules/zygisksu/config.prop" ] && [ ! -f "/data/adb/nyazygisk/config.prop" ]; then
+  ui_print "- Migrating existing WebUI config to /data/adb/nyazygisk"
+  mkdir -p "/data/adb/nyazygisk"
+  cp -af "/data/adb/modules/zygisksu/config.prop" "/data/adb/nyazygisk/config.prop"
+fi
+
 mkdir "$MODPATH/bin"
 mkdir "$MODPATH/lib"
 mkdir "$MODPATH/lib64"

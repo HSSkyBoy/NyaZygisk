@@ -1,6 +1,6 @@
-const PROP_PATH = "/data/adb/neozygisk/module.prop";
-const CONFIG_PATH = "/data/adb/modules/zygisksu/config.prop";
-const CONFIG_DIR = "/data/adb/modules/zygisksu";
+const PROP_PATH = "/data/adb/nyazygisk/module.prop";
+const CONFIG_PATH = "/data/adb/nyazygisk/config.prop";
+const CONFIG_DIR = "/data/adb/nyazygisk";
 const PACKAGES_LIST_PATH = "/data/system/packages.list";
 const MODULE_MARKER = "@@NZMOD@@ ";
 const LANG_STORAGE_KEY = "nyazygisk.lang";

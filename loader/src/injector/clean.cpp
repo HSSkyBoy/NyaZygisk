@@ -29,7 +29,7 @@
 #include "solist.hpp"
 #include "zygisk.hpp"
 
-constexpr const char *kConfigPath = "/data/adb/modules/zygisksu/config.prop";
+constexpr const char *kConfigPath = "/data/adb/nyazygisk/config.prop";
 
 void clean_libc_trace() {
     auto g_array = Atexit::findAtexitArray();

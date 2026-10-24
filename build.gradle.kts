@@ -23,7 +23,7 @@ val minKsuVersion by extra(10940)
 val minKsudVersion by extra(11425)
 val maxKsuVersion by extra(50000)
 val minMagiskVersion by extra(26402)
-val workDirectory by extra("/data/adb/neozygisk")
+val workDirectory by extra("/data/adb/nyazygisk")
 val updateJson by extra("https://www.nkbe.top/nyazygisk/zygisk.json")
 
 val androidMinSdkVersion by extra(25)

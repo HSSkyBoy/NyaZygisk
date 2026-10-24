@@ -16,7 +16,7 @@ use std::fs;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-const CONFIG_PATH: &str = "/data/adb/modules/zygisksu/config.prop";
+const CONFIG_PATH: &str = "/data/adb/nyazygisk/config.prop";
 const PACKAGES_LIST_PATH: &str = "/data/system/packages.list";
 
 const PER_USER_RANGE: u32 = 100_000;
