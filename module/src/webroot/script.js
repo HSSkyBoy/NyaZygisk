@@ -51,6 +51,8 @@ const I18N = {
     bridge_missing: "No supported WebUI bridge detected",
     anonymous_memory: "Anonymous memory",
     anonymous_memory_hint: "Hide module mappings after specialization",
+    custom_linker: "Custom linker",
+    custom_linker_hint: "Load modules without the system linker (experimental)",
     app_exclude: "App exclusion",
     app_exclude_hint: "Checked user apps load no Zygisk modules. System apps cannot be excluded. Changes take effect the next time the app starts.",
     exclude_unmount: "Unmount for excluded apps",
@@ -109,6 +111,8 @@ const I18N = {
     bridge_missing: "找不到支援的 WebUI bridge",
     anonymous_memory: "匿名記憶體",
     anonymous_memory_hint: "特化後隱藏模組的記憶體映射",
+    custom_linker: "自訂鏈接器",
+    custom_linker_hint: "不經過系統鏈接器載入模組（實驗性）",
     app_exclude: "應用排除",
     app_exclude_hint: "勾選的使用者應用不載入任何 Zygisk 模組。系統應用無法排除；變更於該應用下次啟動時生效。",
     exclude_unmount: "同時卸載模組掛載",
@@ -167,6 +171,8 @@ const I18N = {
     bridge_missing: "找不到支持的 WebUI bridge",
     anonymous_memory: "匿名内存",
     anonymous_memory_hint: "特化后隐藏模块的内存映射",
+    custom_linker: "自定义链接器",
+    custom_linker_hint: "不经过系统链接器加载模块（实验性）",
     app_exclude: "应用排除",
     app_exclude_hint: "勾选的用户应用不加载任何 Zygisk 模块。系统应用无法排除；更改在该应用下次启动时生效。",
     exclude_unmount: "同时卸载模块挂载",
@@ -237,6 +243,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("anonymous-memory").addEventListener("change", (event) => {
     saveToggle(event.target, "anonymous_memory");
+  });
+  $("custom-linker").addEventListener("change", (event) => {
+    saveToggle(event.target, "custom_linker");
   });
   $("exclude-unmount").addEventListener("change", (event) => {
     saveToggle(event.target, "exclude_unmount");
@@ -747,6 +756,7 @@ async function refresh(showSuccessToast) {
     if (configWrite === writeBeforeRead) {
       const config = parseProp(sections.config);
       $("anonymous-memory").checked = config.anonymous_memory === "1";
+      $("custom-linker").checked = config.custom_linker !== "0";
       $("exclude-unmount").checked = config.exclude_unmount !== "0";
       savedExcluded = new Set(
         (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),

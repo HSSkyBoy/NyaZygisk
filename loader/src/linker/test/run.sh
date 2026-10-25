@@ -93,4 +93,15 @@ for arch in "${archs[@]}"; do
         -llog -o "$OUT/$arch-spoof-test"
     cp "$OUT/$arch-spoof-test" "$dst/spoof_test"
     chroot "$rootfs" /data/local/tmp/spoof_test
+
+    # custom_linker / anonymous_memory config.prop toggle semantics.
+    echo "---- config.prop toggle semantics ----"
+    "$cc" -std=c++23 -fno-exceptions -ffunction-sections -fdata-sections -Wl,--gc-sections \
+        -I"$INCLUDE_DIR" -I"$INJECTOR_DIR" -I"$LINKER_DIR" \
+        -I"$LINKER_DIR/../external/lsplt/lsplt/src/main/jni/include" \
+        -I"$LINKER_DIR/../external/lzma" \
+        "$HERE/config_toggle_test.cpp" "$INJECTOR_DIR/clean.cpp" "$LINKER_DIR/cfi.cpp" \
+        -llog -o "$OUT/$arch-config-test"
+    cp "$OUT/$arch-config-test" "$dst/config_test"
+    chroot "$rootfs" /data/local/tmp/config_test
 done

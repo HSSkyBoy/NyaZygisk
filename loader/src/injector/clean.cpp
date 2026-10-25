@@ -51,26 +51,37 @@ void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded
     }
 }
 
-bool is_anonymous_memory_enabled() {
+// True if config.prop contains a line matching exactly "key=value".
+static bool config_line_present(const char *key, const char *value) {
     FILE *fp = fopen(kConfigPath, "r");
     if (fp == nullptr) return false;
 
+    char needle[64];
+    snprintf(needle, sizeof(needle), "%s=%s", key, value);
+
     char line[128];
-    bool enabled = false;
+    bool found = false;
     while (fgets(line, sizeof(line), fp) != nullptr) {
         char *end = line + strlen(line);
         while (end > line && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' ||
                               end[-1] == '\t')) {
             *--end = '\0';
         }
-        if (strcmp(line, "anonymous_memory=1") == 0) {
-            enabled = true;
+        if (strcmp(line, needle) == 0) {
+            found = true;
             break;
         }
     }
     fclose(fp);
-    return enabled;
+    return found;
 }
+
+bool is_anonymous_memory_enabled() { return config_line_present("anonymous_memory", "1"); }
+
+// Opt-out, not opt-in: the custom module loader (loader/src/linker/) is used unless the
+// WebUI/config.prop explicitly turns it off, so a missing config.prop (fresh install)
+// keeps the experimental linker rather than silently falling back to android_dlopen_ext.
+bool is_custom_linker_enabled() { return !config_line_present("custom_linker", "0"); }
 
 static size_t page_size() {
     long sz = sysconf(_SC_PAGESIZE);
