@@ -278,11 +278,25 @@ static int anonymize_ranges(const MapRange *ranges, int nr, bool clear_write_per
         if (size == 0) continue;
         void *addr = reinterpret_cast<void *>(ranges[i].start);
 
-        // Preflight every permission the replacement will need. In particular,
-        // executable mappings fail here on an execmem denial, before the original
-        // file-backed VMA is displaced.
-        int copy_prot = ranges[i].prot | PROT_READ | PROT_WRITE;
-        void *copy = mmap(nullptr, size, copy_prot, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        // Final protection the target address should have once this call returns —
+        // ranges[i].prot, minus the write bit when this range is RWX and the caller
+        // asked to drop it (see below). Computed once so it can be applied to the
+        // scratch copy BEFORE the mremap swap: the target then goes straight from its
+        // old protection to this exact final one, with no intermediate state. An
+        // earlier version of this function instead mmap'd the copy with every bit the
+        // target would ever need (so an executable range's copy was RWX from the
+        // start) and only narrowed it down with a *second* mprotect AFTER the mremap —
+        // which left every executable range briefly simultaneously writable and
+        // executable (W+X) for the few instructions between the swap and that
+        // follow-up call. v2.4 never had this window; match it.
+        const bool was_rwx = (ranges[i].prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) ==
+                            (PROT_READ | PROT_WRITE | PROT_EXEC);
+        const int final_prot = (clear_write_permission && was_rwx)
+                                   ? (ranges[i].prot & ~PROT_WRITE)
+                                   : ranges[i].prot;
+
+        // The scratch copy only needs RW to receive the memcpy below.
+        void *copy = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (copy == MAP_FAILED) {
             LOGV("maps-spoof: mmap preflight failed for [%p, %p]", addr,
                  reinterpret_cast<void *>(ranges[i].end));
@@ -306,30 +320,32 @@ static int anonymize_ranges(const MapRange *ranges, int nr, bool clear_write_per
             continue;
         }
 
+        // Apply the target's final permissions to the copy now, while it is still at
+        // its own, harmless address — an execmem denial on an executable range
+        // surfaces here, before the original mapping at `addr` is touched at all, same
+        // safety property as the old preflight-on-mmap approach but without ever
+        // creating an RWX mapping to get there. This also folds in the optional
+        // write-bit drop: scoped to exactly the range this call already matched and is
+        // about to anonymize anyway — never a fresh scan of /proc/self/maps for "any
+        // RWX entry", which would also catch other subsystems' legitimate RWX mappings
+        // (e.g. ART's JIT cache, a GPU shader compiler cache) that happen to exist in
+        // this process and have nothing to do with our module. Downgrading one of
+        // those breaks its owner the next time it writes to memory it still believes
+        // is writable.
+        if (mprotect(copy, size, final_prot) != 0) {
+            PLOGE("maps-spoof: set replacement permissions failed [%p, %p]", addr,
+                  reinterpret_cast<void *>(ranges[i].end));
+            munmap(copy, size);
+            continue;
+        }
+
         if (mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr) == MAP_FAILED) {
             PLOGE("maps-spoof: mremap failed [%p, %p]", addr,
                   reinterpret_cast<void *>(ranges[i].end));
             munmap(copy, size);
             continue;
         }
-
-        if (mprotect(addr, size, ranges[i].prot) != 0) {
-            PLOGE("maps-spoof: restore target protection failed [%p, %p]", addr,
-                  reinterpret_cast<void *>(ranges[i].end));
-            continue;
-        }
-
-        // Optionally drop the write bit from a range that was RWX. Scoped to exactly the
-        // ranges this call already matched and just anonymized — never a fresh scan of
-        // /proc/self/maps for "any RWX entry", which would also catch other subsystems'
-        // legitimate RWX mappings (e.g. ART's JIT cache, a GPU shader compiler cache) that
-        // happen to exist in this process at the time and have nothing to do with our
-        // module. Downgrading one of those breaks its owner the next time it writes to
-        // memory it still believes is writable.
-        if (clear_write_permission &&
-            (ranges[i].prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) ==
-                (PROT_READ | PROT_WRITE | PROT_EXEC) &&
-            mprotect(addr, size, PROT_READ | PROT_EXEC) == 0) {
+        if (final_prot != ranges[i].prot) {
             LOGV("maps-spoof: cleared write permission for [%p, %p]", addr,
                  reinterpret_cast<void *>(ranges[i].end));
         }
