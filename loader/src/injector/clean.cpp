@@ -78,10 +78,10 @@ static bool config_line_present(const char *key, const char *value) {
 
 bool is_anonymous_memory_enabled() { return config_line_present("anonymous_memory", "1"); }
 
-// Opt-out, not opt-in: the custom module loader (loader/src/linker/) is used unless the
-// WebUI/config.prop explicitly turns it off, so a missing config.prop (fresh install)
-// keeps the experimental linker rather than silently falling back to android_dlopen_ext.
-bool is_custom_linker_enabled() { return !config_line_present("custom_linker", "0"); }
+// Opt-in, like anonymous_memory: the custom module loader (loader/src/linker/) is
+// experimental, so a missing config.prop (fresh install) or a config without the key
+// keeps the plain android_dlopen_ext path until the WebUI explicitly turns it on.
+bool is_custom_linker_enabled() { return config_line_present("custom_linker", "1"); }
 
 static size_t page_size() {
     long sz = sysconf(_SC_PAGESIZE);

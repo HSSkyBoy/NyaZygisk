@@ -34,21 +34,21 @@ int main() {
     mkdir("/data/adb", 0755);  // mkdir doesn't create parents; the rootfs may lack this
     mkdir(kConfigDir, 0755);
 
-    printf("== custom_linker: opt-out semantics\n");
+    printf("== custom_linker: opt-in semantics\n");
     WriteConfig(nullptr);  // no config.prop at all (fresh install)
-    Check("missing config.prop -> custom linker stays on", is_custom_linker_enabled());
+    Check("missing config.prop -> custom linker stays off", !is_custom_linker_enabled());
 
     WriteConfig("anonymous_memory=1\n");  // present, but no custom_linker line
-    Check("config.prop without the key -> custom linker stays on", is_custom_linker_enabled());
+    Check("config.prop without the key -> custom linker stays off", !is_custom_linker_enabled());
 
     WriteConfig("custom_linker=0\n");
     Check("custom_linker=0 -> disabled", !is_custom_linker_enabled());
 
     WriteConfig("custom_linker=1\n");
-    Check("custom_linker=1 -> stays on (not just the absence of =0)", is_custom_linker_enabled());
+    Check("custom_linker=1 -> enabled", is_custom_linker_enabled());
 
-    WriteConfig("anonymous_memory=1\ncustom_linker=0\nexclude_unmount=1\n");
-    Check("custom_linker=0 among other keys -> still disabled", !is_custom_linker_enabled());
+    WriteConfig("anonymous_memory=1\ncustom_linker=1\nexclude_unmount=1\n");
+    Check("custom_linker=1 among other keys -> still enabled", is_custom_linker_enabled());
 
     printf("== anonymous_memory: opt-in semantics (regression check on the shared helper)\n");
     WriteConfig(nullptr);

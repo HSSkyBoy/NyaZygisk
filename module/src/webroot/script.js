@@ -756,7 +756,7 @@ async function refresh(showSuccessToast) {
     if (configWrite === writeBeforeRead) {
       const config = parseProp(sections.config);
       $("anonymous-memory").checked = config.anonymous_memory === "1";
-      $("custom-linker").checked = config.custom_linker !== "0";
+      $("custom-linker").checked = config.custom_linker === "1";
       $("exclude-unmount").checked = config.exclude_unmount !== "0";
       savedExcluded = new Set(
         (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),

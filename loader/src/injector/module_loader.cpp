@@ -10,8 +10,8 @@
 namespace modloader {
 
 void *Dlopen(int memfd, const char *name, bool *via_system) {
-    // custom_linker=0 in config.prop (via the WebUI) opts all the way out: the
-    // experimental loader is never invoked, not even attempted, so a module that
+    // Unless custom_linker=1 is in config.prop (via the WebUI), the experimental
+    // loader is never invoked, not even attempted, so a module that
     // only fails on this device still has a plain android_dlopen_ext path with
     // none of the custom linker's code anywhere near it.
     if (is_custom_linker_enabled()) {
