@@ -118,21 +118,24 @@ static bool find_cfi_shadow(CfiShadowRange *out) {
     FILE *fp = fopen("/proc/self/maps", "re");
     if (fp == nullptr) return false;
     char line[512];
+    CfiShadowRange run, best;
     while (fgets(line, sizeof(line), fp) != nullptr) {
         if (strstr(line, "[anon:cfi shadow]") == nullptr) continue;
         unsigned long start = 0, end = 0;
-        char perms[5] = {};
-        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3) continue;
-        out->start = start;
-        out->end = end;
-        out->prot = (perms[0] == 'r' ? PROT_READ : 0) |
-                    (perms[1] == 'w' ? PROT_WRITE : 0) |
-                    (perms[2] == 'x' ? PROT_EXEC : 0);
-        fclose(fp);
-        return true;
+        if (sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
+        if (run.end != 0 && run.end == start) {
+            run.end = end;
+        } else {
+            run.start = start;
+            run.end = end;
+        }
+        if (run.end - run.start > best.end - best.start) best = run;
     }
     fclose(fp);
-    return false;
+    if (best.end == 0) return false;
+    *out = best;
+    out->prot = PROT_READ;
+    return true;
 }
 
 static bool sync_cfi_shadow(uintptr_t old_start, uintptr_t new_start, size_t size) {
