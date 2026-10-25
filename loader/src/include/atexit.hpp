@@ -1,10 +1,8 @@
 #pragma once
 
-#include <inttypes.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
@@ -15,17 +13,17 @@
 #include <sys/user.h>
 
 #include <memory>
-#include <string>
+#include <sstream>
 
 namespace Atexit {
 
+// Bionic resolves this through AT_PAGESZ on every architecture that can boot with pages larger
+// than 4 KiB. The NDK, in contrast, still hands us a compile-time PAGE_SIZE of 4096 on arm64
+// (bits/page_size.h keeps the macro for __NDK_MAJOR__ <= 27), so trusting the macro would give us
+// a different view of the array's pages than libc has on a 16 KiB-page device.
 inline size_t page_size() {
-#if defined(PAGE_SIZE)
-    return PAGE_SIZE;
-#else
     static const size_t page_size = getauxval(AT_PAGESZ);
     return page_size;
-#endif
 }
 
 // The maximum page size supported on any Android device. As
@@ -48,6 +46,20 @@ inline uintptr_t page_offset(uintptr_t x) { return x & (page_size() - 1); }
 // itself at the start of a page.
 inline uintptr_t page_end(uintptr_t x) { return page_start(x + page_size() - 1); }
 
+// Why a fingerprint scrub stopped where it did. The caller reports this once libc's atexit lock is
+// released, never from inside the critical section.
+enum class ScrubStatus {
+    kDone,            // the array was compacted and its counters rewound
+    kNothingToScrub,  // libc's array carries no trace of the modules we unloaded
+    kNoArray,         // libc's private atexit array could not be located
+    kNoLock,          // libc's atexit mutex could not be located, so we cannot mutate safely
+    kLockBusy,        // another thread is registering or running handlers right now
+    kNotWritable,     // mprotect refused to open up the array pages
+    kLeftWritable,    // the array was compacted, but could not be protected read-only again
+};
+
+const char* describe(ScrubStatus status);
+
 struct AtexitEntry {
     void (*fn)(void*);  // the __cxa_atexit callback
     void* arg;          // argument for `fn` callback
@@ -65,32 +77,44 @@ public:
           total_appends_(initial_total_appends) {}
 
     std::string format_state_string() const {
-        char buf[640];
-        snprintf(buf, sizeof(buf),
-                 "\n--- Live AtexitArray Snapshot State ---\n"
-                 "\t(this pointer):  %p\n"
-                 "\tarray_:          %p\n"
-                 "\tsize_:           %zu (0x%zx)\n"
-                 "\textracted_count_: %zu (0x%zx)\n"
-                 "\tcapacity_:       %zu (0x%zx)\n"
-                 "\ttotal_appends_:  %" PRIu64 " (0x%" PRIx64 ")\n"
-                 "---------------------------------------",
-                 static_cast<const void*>(this), static_cast<const void*>(array_), size_, size_,
-                 extracted_count_, extracted_count_, capacity_, capacity_, total_appends_,
-                 total_appends_);
-        return buf;
+        std::stringstream ss;
+
+        // Use the << operator to stream text and variables into the stringstream.
+        // The '\n' and '\t' characters provide the desired logcat formatting.
+        ss << "\n--- Live AtexitArray Snapshot State ---\n";
+        ss << "\t(this pointer):  " << static_cast<const void*>(this) << "\n";
+        ss << "\tarray_:          " << static_cast<const void*>(array_) << "\n";
+
+        // For numeric values, show both decimal and hexadecimal for easier debugging.
+        ss << "\tsize_:           " << size_ << " (0x" << std::hex << size_ << std::dec << ")\n";
+        ss << "\textracted_count_: " << extracted_count_ << " (0x" << std::hex << extracted_count_
+           << std::dec << ")\n";
+        ss << "\tcapacity_:       " << capacity_ << " (0x" << std::hex << capacity_ << std::dec
+           << ")\n";
+        ss << "\ttotal_appends_:  " << total_appends_ << " (0x" << std::hex << total_appends_
+           << std::dec << ")\n";
+
+        ss << "---------------------------------------";
+
+        // The .str() method returns the complete, concatenated string.
+        return ss.str();
     }
 
     size_t size() const { return size_; }
     uint64_t total_appends() const { return total_appends_; }
     const AtexitEntry& operator[](size_t idx) const { return array_[idx]; }
-    bool isSane() const {
-        constexpr size_t MAX_REASONABLE_ATEXIT_ENTRIES = 4096 * 16;
-        return array_ != nullptr && size_ <= capacity_ && capacity_ < MAX_REASONABLE_ATEXIT_ENTRIES &&
-               extracted_count_ <= size_;
-    }
 
-    void recompact();
+    // Compacts the array in place and rewinds the counters that give our unloaded modules away.
+    //
+    // The caller must hold libc's atexit lock. __cxa_atexit and __cxa_finalize mutate the array,
+    // its page protections and even its mapping (append_entry() mremaps it to grow) under that
+    // lock; flipping the pages back to PROT_READ behind their back makes their store fault with
+    // SEGV_ACCERR, and moving entries while they append loses or corrupts them.
+    //
+    // The caller must also keep logging out of that critical section, since liblog can reach
+    // __cxa_atexit and deadlock on the very mutex we hold. An mprotect failure is therefore
+    // reported through `protect_errno` instead of a log line.
+    ScrubStatus recompact(int& protect_errno);
 
 private:
     AtexitEntry* array_;
@@ -105,14 +129,16 @@ private:
     static size_t page_start_of_index(size_t idx) { return page_start(idx * sizeof(AtexitEntry)); }
     static size_t page_end_of_index(size_t idx) { return page_end(idx * sizeof(AtexitEntry)); }
 
-    // Recompact the array if it will save at least one page of memory at the end.
-    bool needs_recompaction() const {
-        return page_end_of_index(size_ - extracted_count_) < page_end_of_index(size_);
-    }
+    // True while the array still shows that handlers were registered and then removed: either null
+    // holes left behind by __cxa_finalize, or an append counter that outruns the live entries.
+    // Bionic instead asks whether compaction would free a page, which is not our concern here.
+    bool has_fingerprint() const { return extracted_count_ > 0 || total_appends_ > size_; }
 
     bool set_writable(bool writable, size_t start_idx, size_t num_entries);
 };
 
-AtexitArray* findAtexitArray();
+// Erases the traces that unloading our modules left in libc's exit-handler array. Best effort:
+// every obstacle leaves libc's state exactly as it was.
+ScrubStatus scrubFingerprint();
 
 }  // namespace Atexit
