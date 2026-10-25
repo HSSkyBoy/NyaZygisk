@@ -77,4 +77,20 @@ for arch in "${archs[@]}"; do
     mods="/data/local/tmp/$arch-mod.so"
     [ -f "$OUT/$arch-mod-bti.so" ] && mods="$mods /data/local/tmp/$arch-mod-bti.so"
     chroot "$rootfs" /data/local/tmp/runner --module $mods
+
+    # spoof_module_maps() regression test: links the real clean.cpp (not a
+    # reimplementation) and checks that clearing the write bit on our module's
+    # RWX mapping never touches an unrelated RWX mapping elsewhere in the
+    # process (e.g. an ART JIT cache). --gc-sections drops clean.cpp's unused
+    # externals (Linker::, Atexit::, Fossil::) that this test never calls.
+    echo "---- spoof_module_maps write-permission scoping ----"
+    INJECTOR_DIR="$LINKER_DIR/../injector"
+    "$cc" -std=c++23 -fno-exceptions -ffunction-sections -fdata-sections -Wl,--gc-sections \
+        -I"$INCLUDE_DIR" -I"$INJECTOR_DIR" -I"$LINKER_DIR" \
+        -I"$LINKER_DIR/../external/lsplt/lsplt/src/main/jni/include" \
+        -I"$LINKER_DIR/../external/lzma" \
+        "$HERE/spoof_rwx_test.cpp" "$INJECTOR_DIR/clean.cpp" "$LINKER_DIR/cfi.cpp" \
+        -llog -o "$OUT/$arch-spoof-test"
+    cp "$OUT/$arch-spoof-test" "$dst/spoof_test"
+    chroot "$rootfs" /data/local/tmp/spoof_test
 done
