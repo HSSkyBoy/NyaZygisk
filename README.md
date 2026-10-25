@@ -50,6 +50,7 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 * HyperOS `hyos_spawner` runtime injection.
 * Android 17 Zygote signatures, including GrapheneOS.
 * BTI-enabled devices.
+* `riscv64` devices, with ZN inline hooks backed by [rv64hook](https://github.com/eirv/riscv64-inline-hook).
 
 ### WebUI
 
@@ -57,6 +58,14 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 * Active modules labelled by type (`[Zygisk]` / `[Next]`) with their target process bindings.
 * Per-app module exclusion list for user apps.
 * Device information, including the vendor ROM version.
+* Settings, stored in `/data/adb/nyazygisk/config.prop`, that apply to app processes started afterwards (see [Experimental options](#experimental-options)).
+
+### Experimental options
+
+Both options are off by default and can be switched in the WebUI.
+
+* **Anonymous memory** (`anonymous_memory=1`): after specialization, turns the module mappings in `/proc/self/maps` into anonymous mappings. Some users have reported problems with it enabled, such as the system UI failing to start or `Monitor: NO`; if you see that, turn it off first.
+* **Custom linker** (`custom_linker=1`): loads modules with NyaZygisk's built-in ELF loader instead of the system linker, so they never enter its solist. If a module cannot be loaded this way, it falls back to the system linker.
 
 ## Requirements
 
