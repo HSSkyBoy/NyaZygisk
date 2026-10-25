@@ -211,6 +211,9 @@ struct ZygiskModule {
     void setOption(zygisk::Option opt);
     static uint32_t getFlags();
     bool tryUnload() const;
+    // True if this module was loaded by the system linker (fallback path) and
+    // therefore left a trace in solist that must be scrubbed.
+    bool loadedBySystem() const;
     void clearApi() { memset(&api, 0, sizeof(api)); }
     int getId() const { return id; }
 

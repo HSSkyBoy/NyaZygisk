@@ -24,6 +24,7 @@
 #endif
 
 #include "atexit.hpp"
+#include "cfi.hpp"
 #include "fossil.hpp"
 #include "logging.hpp"
 #include "solist.hpp"
@@ -32,10 +33,9 @@
 constexpr const char *kConfigPath = "/data/adb/nyazygisk/config.prop";
 
 void clean_libc_trace() {
-    auto g_array = Atexit::findAtexitArray();
-    if (g_array != nullptr) {
-        g_array->recompact();
-        LOGV("g_array after recompact: %s", g_array->format_state_string().c_str());
+    const auto status = Atexit::scrubFingerprint();
+    if (status != Atexit::ScrubStatus::kDone && status != Atexit::ScrubStatus::kNothingToScrub) {
+        LOGW("atexit fingerprint left in place: %s", Atexit::describe(status));
     }
 }
 
@@ -221,13 +221,46 @@ bool restore_cfi_shadow(const SavedCfiShadow &saved) {
     return true;
 }
 
+void register_cfi_unchecked(uintptr_t base, size_t size) {
+    if (base == 0 || size == 0) return;
+
+    CfiShadowRange shadow;
+    if (!find_cfi_shadow(&shadow)) return;  // device/process without cross-DSO CFI
+
+    uintptr_t end = base + size - 1;
+    uintptr_t dst = shadow.start + cfi_shadow_offset(base);
+    uintptr_t dst_end = shadow.start + cfi_shadow_offset(end) + kCfiShadowEntrySize;
+    if (dst < shadow.start || dst_end > shadow.end || dst_end <= dst) {
+        LOGE("cfi-shadow: module range outside shadow map");
+        return;
+    }
+
+    size_t pg = page_size();
+    uintptr_t prot_start = page_down(dst, pg);
+    uintptr_t prot_end = page_up(dst_end, pg);
+    bool reprotect = (shadow.prot & PROT_WRITE) == 0;
+    if (reprotect && mprotect(reinterpret_cast<void *>(prot_start), prot_end - prot_start,
+                              shadow.prot | PROT_WRITE) != 0) {
+        LOGE("cfi-shadow: make writable failed");
+        return;
+    }
+
+    int changed = linker::CfiMarkUncheckedRange(shadow.start, shadow.end, base, size);
+
+    if (reprotect)
+        mprotect(reinterpret_cast<void *>(prot_start), prot_end - prot_start, shadow.prot);
+
+    LOGV("cfi-shadow: marked %d granule(s) unchecked for [%p, %p]", changed,
+         reinterpret_cast<void *>(base), reinterpret_cast<void *>(base + size));
+}
+
 struct MapRange {
     uintptr_t start = 0;
     uintptr_t end = 0;
     int prot = 0;
 };
 
-static int anonymize_ranges(const MapRange *ranges, int nr) {
+static int anonymize_ranges(const MapRange *ranges, int nr, bool clear_write_permission = false) {
     int done = 0;
     for (int i = 0; i < nr; ++i) {
         size_t size = ranges[i].end - ranges[i].start;
@@ -273,6 +306,21 @@ static int anonymize_ranges(const MapRange *ranges, int nr) {
             PLOGE("maps-spoof: restore target protection failed [%p, %p]", addr,
                   reinterpret_cast<void *>(ranges[i].end));
             continue;
+        }
+
+        // Optionally drop the write bit from a range that was RWX. Scoped to exactly the
+        // ranges this call already matched and just anonymized — never a fresh scan of
+        // /proc/self/maps for "any RWX entry", which would also catch other subsystems'
+        // legitimate RWX mappings (e.g. ART's JIT cache, a GPU shader compiler cache) that
+        // happen to exist in this process at the time and have nothing to do with our
+        // module. Downgrading one of those breaks its owner the next time it writes to
+        // memory it still believes is writable.
+        if (clear_write_permission &&
+            (ranges[i].prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) ==
+                (PROT_READ | PROT_WRITE | PROT_EXEC) &&
+            mprotect(addr, size, PROT_READ | PROT_EXEC) == 0) {
+            LOGV("maps-spoof: cleared write permission for [%p, %p]", addr,
+                 reinterpret_cast<void *>(ranges[i].end));
         }
 
         // Clear VMA anon name to make it pure anonymous (path in /proc/self/maps becomes empty).
@@ -431,7 +479,7 @@ int spoof_fd_maps(int fd, bool private_only) {
     return done;
 }
 
-int spoof_virtual_maps(const char *path_substr, bool private_only) {
+int spoof_virtual_maps(const char *path_substr, bool private_only, bool clear_write_permission) {
     if (path_substr == nullptr || path_substr[0] == '\0') return 0;
     MapRange ranges[64];
     int nr = 0;
@@ -452,40 +500,22 @@ int spoof_virtual_maps(const char *path_substr, bool private_only) {
     }
     fclose(fp);
 
-    int done = anonymize_ranges(ranges, nr);
+    int done = anonymize_ranges(ranges, nr, clear_write_permission);
     LOGV("maps-spoof: anonymized %d/%d segment(s) matching '%s'", done, nr, path_substr);
     return done;
 }
 
 
 void spoof_module_maps(bool clear_write_permission) {
+    // clear_write_permission is forwarded straight into the same anonymize pass that already
+    // matched these paths, so the write bit is only ever dropped from a range we just verified
+    // is actually one of our module's own (memfd-derived) mappings — never from a fresh,
+    // unscoped /proc/self/maps rescan for "any RWX entry", which would also catch other
+    // subsystems' legitimate RWX mappings that happen to exist in this process (ART's JIT
+    // cache, a GPU shader compiler cache, ...) and have nothing to do with our module.
     constexpr std::array paths{"jit-cache-zygisk", "zygisk-module", "zn-module"};
     for (const char *path : paths) {
-        spoof_virtual_maps(path, /*private_only=*/true);
-    }
-
-    if (clear_write_permission) {
-        FILE *fp = fopen("/proc/self/maps", "re");
-        if (fp != nullptr) {
-            char line[512];
-            while (fgets(line, sizeof(line), fp) != nullptr) {
-                unsigned long start = 0, end = 0;
-                char perms[5] = {};
-                int path_off = 0;
-                if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %n", &start, &end, perms, &path_off) < 3)
-                    continue;
-                if (perms[0] == 'r' && perms[1] == 'w' && perms[2] == 'x') {
-                    void *addr = reinterpret_cast<void *>(start);
-                    size_t size = end - start;
-                    int new_perms = PROT_READ | PROT_EXEC;
-                    if (mprotect(addr, size, new_perms) == 0) {
-                        LOGV("cleared write permission for rwx entry [%p, %p]", addr,
-                             reinterpret_cast<void *>(end));
-                    }
-                }
-            }
-            fclose(fp);
-        }
+        spoof_virtual_maps(path, /*private_only=*/true, clear_write_permission);
     }
 }
 

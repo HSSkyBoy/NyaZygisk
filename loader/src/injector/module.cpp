@@ -20,6 +20,7 @@
 #include "dl.hpp"
 #include "files.hpp"
 #include "logging.hpp"
+#include "module_loader.hpp"
 #include "solist.hpp"
 #include "misc.hpp"
 #include "zygisk.hpp"
@@ -127,7 +128,9 @@ void ZygiskModule::setOption(zygisk::Option opt) {
 
 uint32_t ZygiskModule::getFlags() { return g_ctx ? (g_ctx->info_flags & ~PRIVATE_MASK) : 0; }
 
-bool ZygiskModule::tryUnload() const { return unload && dlclose(handle) == 0; }
+bool ZygiskModule::tryUnload() const { return unload && modloader::Dlclose(handle); }
+
+bool ZygiskModule::loadedBySystem() const { return !modloader::IsCustom(handle); }
 
 // -----------------------------------------------------------------
 
@@ -336,8 +339,9 @@ void ZygiskContext::run_modules_pre() {
     auto size = ms.size();
     for (size_t i = 0; i < size; i++) {
         auto &m = ms[i];
-        if (void *handle = DlopenMem(m.memfd, RTLD_NOW);
-            void *entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
+        bool via_system = false;
+        if (void *handle = modloader::Dlopen(m.memfd, "zygisk-module", &via_system);
+            void *entry = handle ? modloader::Dlsym(handle, "zygisk_module_entry") : nullptr) {
             modules.emplace_back(i, handle, entry);
         }
     }
@@ -363,18 +367,36 @@ void ZygiskContext::run_modules_post() {
             m.postServerSpecialize(args.server);
         }
     }
+
+    // Only modules that fell back to the system linker ended up in solist and
+    // bumped g_module_load_counter; custom-linker modules leave no such trace,
+    // so the scrub accounting must count only the system-loaded ones.
+    size_t system_loaded = 0;
+    size_t system_unloaded = 0;
+    for (const auto &m : modules) {
+        if (m.loadedBySystem()) system_loaded++;
+    }
+
     // Reverse: the allocator is LIFO, so releasing back to front hands the blocks back
     // in ascending order and leaves the allocation sequence monotonic.
     for (auto it = modules.rbegin(); it != modules.rend(); ++it) {
-        if (it->tryUnload()) modules_unloaded++;
+        bool by_system = it->loadedBySystem();
+        if (it->tryUnload()) {
+            modules_unloaded++;
+            if (by_system) system_unloaded++;
+        }
     }
 
     if (modules.size() > 0) {
-        LOGV("modules unloaded: %zu/%zu", modules_unloaded, modules.size());
+        LOGV("modules unloaded: %zu/%zu (system-loaded: %zu)", modules_unloaded, modules.size(),
+             system_loaded);
         if (modules.size() == modules_unloaded) clean_libc_trace();
         // "zygisk-module" is the memfd name (zygiskd.rs:264); b4d31ab fixed the same
-        // stale needle in spoof_virtual_maps but missed this call site.
-        clean_linker_trace("zygisk-module", modules.size(), modules_unloaded, true);
+        // stale needle in spoof_virtual_maps but missed this call site. Custom-linker
+        // modules are not in solist, so only scrub when something went through fallback.
+        if (system_loaded > 0) {
+            clean_linker_trace("zygisk-module", system_loaded, system_unloaded, true);
+        }
         g_hook->should_spoof_maps =
             (flags & APP_SPECIALIZE) && (modules.size() - modules_unloaded) > 0;
     }

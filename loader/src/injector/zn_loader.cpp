@@ -3,6 +3,7 @@
 #include "logging.hpp"
 #include "daemon.hpp"
 #include "dl.hpp"
+#include "module_loader.hpp"
 #include "zygisk.hpp"
 #include "zygisk_next_api.h"
 
@@ -41,15 +42,16 @@ std::string getProcessName() {
 
 constexpr char kZnMemfdName[] = "zn-module";
 
-bool loadEntry(const zygiskd::ZnPlanEntry& entry) {
-    void* lib = DlopenMem(entry.lib_fd.get(), RTLD_NOW, kZnMemfdName);
+bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system) {
+    *via_system = false;
+    void* lib = modloader::Dlopen(entry.lib_fd.get(), kZnMemfdName, via_system);
     if (!lib) {
-        LOGE("ZN: dlopen %s (fd %d) failed: %s", entry.lib_path.c_str(), entry.lib_fd.get(), dlerror());
+        LOGE("ZN: load %s (fd %d) failed", entry.lib_path.c_str(), entry.lib_fd.get());
         zygiskd::ReportZnModule(entry.lib_path, false);
         return false;
     }
 
-    auto* m = reinterpret_cast<ZygiskNextModule*>(dlsym(lib, "zn_module"));
+    auto* m = reinterpret_cast<ZygiskNextModule*>(modloader::Dlsym(lib, "zn_module"));
     if (!m || !m->onModuleLoaded) {
         LOGE("ZN: %s does not export zn_module", entry.lib_path.c_str());
         zygiskd::ReportZnModule(entry.lib_path, false);
@@ -94,16 +96,23 @@ void loadAllModules(unsigned char connect_retry) {
     LOGI("ZN: received %zu module(s) from daemon", plan.size());
 
     size_t loaded_count = 0;
+    size_t system_loaded = 0;
     for (const auto& entry : plan) {
         if (entry.lib_fd.get() < 0) continue;
-        if (loadEntry(entry)) loaded_count++;
+        bool via_system = false;
+        if (loadEntry(entry, &via_system)) {
+            loaded_count++;
+            if (via_system) system_loaded++;
+        }
     }
 
     // Batch the cleanup after the whole plan is processed, same as the regular Zygisk
-    // module path does once for every module instead of per-module.
-    if (loaded_count > 0 && is_anonymous_memory_enabled()) {
+    // module path does once for every module instead of per-module. Custom-linker
+    // modules leave no memfd mapping and no solist entry, so only scrub when at least
+    // one module fell back to the system loader.
+    if (system_loaded > 0 && is_anonymous_memory_enabled()) {
         spoof_virtual_maps(kZnMemfdName, /*private_only=*/true);
-        clean_linker_trace(kZnMemfdName, loaded_count, loaded_count, /*unload_soinfo=*/true);
+        clean_linker_trace(kZnMemfdName, system_loaded, system_loaded, /*unload_soinfo=*/true);
     }
 }
 

@@ -63,7 +63,7 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 | Item | Requirement |
 | :--- | :--- |
 | Android | 7.1 (API 25) or newer |
-| Architecture | `arm64-v8a`, `armeabi-v7a`, `x86_64` |
+| Architecture | `arm64-v8a`, `armeabi-v7a`, `x86_64`, `riscv64` |
 | APatch | 10762 or newer |
 | KernelSU | kernel 10940 or newer, ksud 11425 or newer |
 | Magisk | 26402 or newer, with built-in Zygisk **disabled** |
@@ -87,7 +87,6 @@ Telegram: [@NyaZygisk](t.me/NYAZYGISK)
 ## Known Limitations
 
 * **ZN module injection targets:** Zygisk Next and ZNNext can inject ZN modules into any init-spawned process declared with `path=` / `name=` in `zn_modules.txt`. NyaZygisk currently intercepts only Zygote and `hyos_spawner`, so ZN modules targeting other system daemons will not be loaded.
-* **Architectures:** `riscv64` is not supported.
 
 ## The DenyList Explained
 
