@@ -6,9 +6,20 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+// MDWE ("Memory-Deny-Write-Execute", Linux 6.3+) lets a process forbid its own
+// future mprotect(PROT_EXEC) on any mapping that was ever writable. Not all
+// NDK sysroots define these yet.
+#ifndef PR_SET_MDWE
+#define PR_SET_MDWE 65
+#endif
+#ifndef PR_MDWE_REFUSE_EXEC_GAIN
+#define PR_MDWE_REFUSE_EXEC_GAIN (1UL << 0)
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -356,6 +367,48 @@ void TestCfiShadow() {
     Check("range past shadow end -> no change", oob == 0);
 }
 
+// Real fault injection: enable MDWE (PR_MDWE_REFUSE_EXEC_GAIN) in a child
+// process, then confirm the loader REPORTS failure (returns nullptr with
+// kError) instead of silently continuing with a non-executable "loaded"
+// module. This is the real-world shape of the bug this harness guards
+// against: SetSegmentProtections() used to ignore mprotect's return value, so
+// a device/kernel that denies PROT_EXEC on a previously-writable page (which
+// is exactly what MDWE does, and what some SELinux/seccomp policies also do)
+// would leave the module mapped non-executable and SIGSEGV on first use
+// instead of falling back to android_dlopen_ext.
+void TestMprotectDenialFallsBack(const char* path, bool anonymous) {
+    printf("== mprotect(PROT_EXEC) denial (MDWE), %s: %s\n",
+           anonymous ? "anonymous" : "file-backed", path);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("  cannot open %s\n", path);
+        g_failures++;
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0) {
+            // Kernel too old for MDWE; nothing to inject. Report "skipped" via
+            // a distinct exit code so the parent doesn't count it as a fail.
+            _exit(2);
+        }
+        linker::LoadError err = linker::LoadError::kNone;
+        void* h = linker::Dlopen(fd, "mdwe-test", anonymous, &err);
+        bool correct = (h == nullptr) && (err == linker::LoadError::kError);
+        _exit(correct ? 0 : 1);
+    }
+    close(fd);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 2) {
+        printf("  (kernel does not support MDWE, skipping)\n");
+        return;
+    }
+    bool correct = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    Check("PROT_EXEC denial is reported as a load failure, not silently ignored", correct);
+}
+
 // Unit test for the GNU-property BTI parser with a synthetic note (arch-neutral).
 void TestBtiParse() {
     printf("== gnu property BTI parse\n");
@@ -407,6 +460,8 @@ int main(int argc, char** argv) {
         ExerciseSystem(argv[i]);
         ExerciseCustom(argv[i], /*anonymous=*/true);
         ExerciseCustom(argv[i], /*anonymous=*/false);
+        TestMprotectDenialFallsBack(argv[i], /*anonymous=*/true);
+        TestMprotectDenialFallsBack(argv[i], /*anonymous=*/false);
     }
     printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
     return g_failures == 0 ? 0 : 1;

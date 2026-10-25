@@ -679,7 +679,7 @@ bool Image::Relocate(LoadError *err) {
 // Protection + constructors
 // --------------------------------------------------------------------------
 
-void Image::SetSegmentProtections() {
+bool Image::SetSegmentProtections() {
     const size_t pg = PageSize();
     for (size_t i = 0; i < phnum_; i++) {
         if (phdr_[i].p_type != PT_LOAD) continue;
@@ -695,8 +695,39 @@ void Image::SetSegmentProtections() {
         // Writable segments keep PROT_WRITE here so relocations (and the RELRO
         // region, which lives inside a PF_W segment) can still be written; the
         // RELRO range is sealed read-only later in ApplyRelro.
-        mprotect(reinterpret_cast<void *>(start), end - start, prot);
+        //
+        // The return value matters: on an anonymous mapping this mprotect is
+        // what actually makes the text segment executable (MapSegments only
+        // opened it PROT_READ|PROT_WRITE). If this is silently ignored and the
+        // call fails — e.g. SELinux/seccomp denying PROT_EXEC on anonymous
+        // memory on a given device/kernel — the segment is left non-executable
+        // and the module SIGSEGVs the instant anything (including an ifunc
+        // resolver, called right after this) tries to run from it. Treat that
+        // as a load failure so the caller can fall back to android_dlopen_ext
+        // instead of continuing with a half-protected module.
+        if (mprotect(reinterpret_cast<void *>(start), end - start, prot) != 0) {
+#if defined(__aarch64__)
+            // PROT_BTI specifically can be rejected on its own (e.g. an older
+            // kernel that does not recognize the bit) even though the base
+            // protection would succeed. Retry without it rather than failing
+            // the whole load over a hardening extra: a module is no less safe
+            // running without BTI enforcement than it already is on a kernel
+            // that cannot honour the request.
+            if (prot & PROT_BTI) {
+                int fallback_prot = prot & ~PROT_BTI;
+                if (mprotect(reinterpret_cast<void *>(start), end - start, fallback_prot) == 0) {
+                    LOGW("linker: %s PROT_BTI rejected for segment at %p, continuing without it",
+                         name_.c_str(), reinterpret_cast<void *>(start));
+                    continue;
+                }
+            }
+#endif
+            LOGE("linker: %s mprotect(%p, %zu, 0x%x) failed: %s", name_.c_str(),
+                 reinterpret_cast<void *>(start), end - start, prot, strerror(errno));
+            return false;
+        }
     }
+    return true;
 }
 
 void Image::ApplyRelro() {
@@ -778,7 +809,11 @@ Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
 
     // Final protections (text R-X) BEFORE relocation, so ifunc resolvers the
     // relocation pass may call are executable; then relocate, then seal RELRO.
-    img->SetSegmentProtections();
+    if (!img->SetSegmentProtections()) {
+        *err = LoadError::kError;
+        delete img;
+        return nullptr;
+    }
     if (!img->Relocate(err)) {
         delete img;
         return nullptr;

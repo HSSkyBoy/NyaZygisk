@@ -80,7 +80,9 @@ private:
     // Final per-segment protections (text R-X, data RW, rodata R), applied
     // BEFORE relocation so ifunc resolvers in the text segment are executable
     // when Relocate calls them. Relocations only write to writable segments.
-    void SetSegmentProtections();
+    // Returns false if a required mprotect failed (e.g. PROT_EXEC denied on
+    // anonymous memory) — the caller should treat that as a load failure.
+    bool SetSegmentProtections();
     // RELRO -> read-only and instruction-cache flush, AFTER relocation.
     void ApplyRelro();
     void CallConstructors();
