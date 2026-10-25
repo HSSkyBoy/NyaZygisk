@@ -739,8 +739,21 @@ void Image::ApplyRelro() {
         mprotect(reinterpret_cast<void *>(start), end - start, PROT_READ);
     }
 
-    __builtin___clear_cache(reinterpret_cast<char *>(map_start_),
-                            reinterpret_cast<char *>(map_start_ + map_size_));
+    // Clear cache per PT_LOAD segment, not over [map_start_, map_start_ +
+    // map_size_) as a whole: that whole-reservation span can include padding
+    // between segments that was never covered by any PT_LOAD (MapSegments
+    // only touches each segment's own byte range, leaving any gap at the
+    // PROT_NONE the initial reservation mmap set it to). A loader whose
+    // segments carry unmapped alignment padding between them — a real,
+    // if less common, ELF layout — turns a clear_cache call over the full
+    // span into a read on a PROT_NONE page: SIGSEGV (SEGV_ACCERR), fatal and
+    // unrecoverable at this point in Load(), in the middle of zygote.
+    for (size_t i = 0; i < phnum_; i++) {
+        if (phdr_[i].p_type != PT_LOAD) continue;
+        uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
+        uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
+        __builtin___clear_cache(reinterpret_cast<char *>(start), reinterpret_cast<char *>(end));
+    }
 }
 
 void Image::CallConstructors() {
