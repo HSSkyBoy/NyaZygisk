@@ -387,7 +387,7 @@ void ZygiskContext::run_modules_post() {
         }
     }
 
-    if (modules.size() > 0) {
+    if (modules.size() > 0 && g_hook != nullptr) {
         LOGV("modules unloaded: %zu/%zu (system-loaded: %zu)", modules_unloaded, modules.size(),
              system_loaded);
         if (modules.size() == modules_unloaded) clean_libc_trace();
