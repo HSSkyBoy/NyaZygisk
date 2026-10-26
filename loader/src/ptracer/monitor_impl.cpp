@@ -93,7 +93,7 @@ void AppMonitor::update_status() {
     }
     runtime_status += "description=[Monitor: ";
     runtime_status += monitor_icon;
-    runtime_status += ", NeoZygisk ";
+    runtime_status += ", NyaZygisk ";
     runtime_status += abi_pretty;
     runtime_status += ": ";
     runtime_status += abi_icon;

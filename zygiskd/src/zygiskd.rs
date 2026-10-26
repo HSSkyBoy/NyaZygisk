@@ -122,7 +122,7 @@ impl Drop for SharedShm {
 
 /// The main function for the zygiskd daemon.
 pub fn main(tmp_path: Option<&str>) -> Result<()> {
-    info!("Welcome to NeoZygisk ({}) !", ZKSU_VERSION);
+    info!("Welcome to NyaZygisk ({}) !", ZKSU_VERSION);
 
     initialize_globals(tmp_path)?;
     // Lenient at startup where a refresh is strict: the daemon serves the heartbeat, the

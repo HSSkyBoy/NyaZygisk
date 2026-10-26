@@ -63,7 +63,7 @@ static bool monitor_is_running() {
 
 // The main entry point for the monitoring process.
 void init_monitor() {
-    LOGI("NeoZygisk %s", ZKSU_VERSION);
+    LOGI("NyaZygisk %s", ZKSU_VERSION);
 
     // Exactly one monitor may exist: two would both seize init and race over the same
     // control socket and status file. Checking here, before prepare_environment(), keeps
@@ -199,7 +199,7 @@ int main(int argc, char **argv) {
  * @param tool_name The name of the executable, typically argv[0].
  */
 static void print_usage(const char *tool_name) {
-    fprintf(stderr, "NeoZygisk Tracer %s\n", ZKSU_VERSION);
+    fprintf(stderr, "NyaZygisk Tracer %s\n", ZKSU_VERSION);
     fprintf(stderr,
             "usage: %s monitor | trace <pid> [--spawn | --standalone | --system_server] | ctl "
             "<start|stop|exit|rearm> | version\n",
@@ -348,6 +348,6 @@ static int handle_ctl(int argc, char **argv) {
  * Prints the tool's version number to standard output.
  */
 static int handle_version() {
-    printf("NeoZygisk Tracer %s\n", ZKSU_VERSION);
+    printf("NyaZygisk Tracer %s\n", ZKSU_VERSION);
     return EXIT_SUCCESS;
 }
