@@ -123,6 +123,8 @@ extract "$ZIPFILE" 'module.prop'               "$MODPATH"
 extract "$ZIPFILE" 'spoof.prop'                "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh'           "$MODPATH"
 extract "$ZIPFILE" 'late-load.sh'              "$MODPATH"
+extract "$ZIPFILE" 'post-mount.sh'             "$MODPATH"
+extract "$ZIPFILE" 'hotinstall.sh'            "$MODPATH"
 extract "$ZIPFILE" 'zygisk-init.sh'            "$MODPATH"
 extract "$ZIPFILE" 'service.sh'                "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'              "$MODPATH"
@@ -182,4 +184,15 @@ HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)
 if [ "$HUAWEI_MAPLE_ENABLED" == "1" ]; then
   ui_print "- Add ro.maple.enable=0"
   echo "ro.maple.enable=0" >>"$MODPATH/system.prop"
+fi
+
+# NeoZygisk is binaries and scripts only, so none of what it installs waits for a boot
+# stage: hotinstall.sh replaces the running monitor and restarts zygote, which is all an
+# update needs. The Maple workaround above is the one exception. KernelSU loads a
+# system.prop from post-fs-data and from late load, but its hot-install path deliberately
+# loads none, so a build that wrote one has to take the reboot.
+if [ "$KSU" ] && [ ! -f "$MODPATH/system.prop" ]; then
+  ui_print "- Applying without a reboot"
+  export MODULE_HOT_INSTALL_REQUEST=true
+  export MODULE_HOT_RUN_SCRIPT=hotinstall.sh
 fi

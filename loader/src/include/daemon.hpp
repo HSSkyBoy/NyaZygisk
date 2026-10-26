@@ -81,6 +81,7 @@ enum class SocketAction {
     RequestZnCompanionSocket,
     GetZnPlan,
     ReportZnModule,
+    RefreshModules,
 };
 
 enum class MountNamespace { Clean, Root };
@@ -120,4 +121,8 @@ void SystemServerStarted();
 int GetSharedMemoryFd();
 
 void UnmapSharedMemory();
+
+/// Asks the daemon to rebuild its module snapshot from disk, and waits for the result.
+/// Synchronous on purpose: the rearm path must not inject against a stale snapshot.
+bool RefreshModules();
 }  // namespace zygiskd

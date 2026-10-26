@@ -38,9 +38,7 @@ static std::string TMP_PATH;
 static constants::ShmLayout *g_shm_base = nullptr;
 static bool g_shm_init_attempted = false;
 
-void Init(const char *path) {
-    TMP_PATH = path;
-}
+void Init(const char *path) { TMP_PATH = path; }
 
 void UnmapSharedMemory() {
     if (g_shm_base) {
@@ -356,5 +354,21 @@ int GetSharedMemoryFd() {
         return -1;
     }
     return shm_fd;
+}
+
+bool RefreshModules() {
+    // Same retry budget as PingHeartbeat: a rearm can reach here immediately after the
+    // monitor forked the daemon, before it has bound its socket, and the whole point of
+    // this call is that nothing is injected until the snapshot is known to be current.
+    UniqueFd fd = Connect(5);
+    if (fd == -1) {
+        PLOGE("request RefreshModules");
+        return false;
+    }
+    if (!socket_utils::write_u8(fd, (uint8_t) SocketAction::RefreshModules)) {
+        PLOGE("request RefreshModules");
+        return false;
+    }
+    return socket_utils::read_u8(fd) == 1;
 }
 }  // namespace zygiskd
