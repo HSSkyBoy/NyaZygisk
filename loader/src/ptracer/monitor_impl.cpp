@@ -9,7 +9,6 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
-#include <dirent.h>
 
 #include "daemon.hpp"
 #include "files.hpp"
@@ -139,9 +138,10 @@ void AppMonitor::update_status() {
         LOGE("Failed to write runtime module.prop: %s", prop_path_.c_str());
     }
 
+    const auto module_prop = get_module_dir() + "/module.prop";
     bool should_write_installed_prop = true;
     if (initial_version_code_ >= 0) {
-        auto cur_file = xopen_file("./module.prop", "r");
+        auto cur_file = xopen_file(module_prop.c_str(), "r");
         if (cur_file != nullptr) {
             file_readline(false, cur_file.get(), [&](std::string_view line_view) -> bool {
                 if (line_view.starts_with("versionCode=")) {
@@ -165,8 +165,8 @@ void AppMonitor::update_status() {
     }
 
     if (should_write_installed_prop) {
-        if (!atomic_write_file("./module.prop", runtime_status)) {
-            LOGE("Failed to write installed module.prop: ./module.prop");
+        if (!atomic_write_file(module_prop, runtime_status)) {
+            LOGE("Failed to write installed module.prop: %s", module_prop.c_str());
         }
     }
 }
@@ -179,9 +179,13 @@ bool AppMonitor::prepare_environment() {
     } else {
         PLOGE("create runtime module.prop");
     }
-    auto orig_prop = xopen_file("./module.prop", "r");
+    // From the module directory, never the working directory: the late-load entry point is
+    // a root shell, whose working directory is wherever the user happened to be, and a
+    // monitor that cannot read this gives up before arming anything.
+    const auto module_prop = get_module_dir() + "/module.prop";
+    auto orig_prop = xopen_file(module_prop.c_str(), "r");
     if (orig_prop == nullptr) {
-        PLOGE("open original prop");
+        PLOGE("open %s", module_prop.c_str());
         return false;
     }
     pre_section_ = "";
@@ -247,60 +251,25 @@ bool AppMonitor::prepare_environment() {
     return true;
 }
 
-
-namespace {
-
-void respawn_preexisting_zygote(const std::string &target_exe) {
-    DIR *proc = opendir("/proc");
-    if (!proc) {
+void AppMonitor::run() {
+    event_loop_.Init();
+    // A handler that failed to initialise has no usable fd, so registering it would leave
+    // the monitor running blind: the control socket would accept nothing and `ctl` would
+    // appear to succeed while the monitor never hears it. Refuse to start instead.
+    // The ptrace handler goes first because it is the one that can lose: seizing init
+    // fails for whoever comes second. Taking the control socket is unconditional and
+    // unlinks whatever holds the name, so doing it before that is settled would leave a
+    // monitor that then exits having unbound the socket of the one still tracing.
+    if (!ptrace_handler_.Init()) {
+        LOGE("failed to initialise the ptrace handler, exiting...");
         return;
     }
-
-    struct dirent *dp;
-    while ((dp = readdir(proc)) != nullptr) {
-        if (dp->d_name[0] < '0' || dp->d_name[0] > '9') {
-            continue;
-        }
-
-        char *endptr = nullptr;
-        long pid = strtol(dp->d_name, &endptr, 10);
-        if (*endptr != '\0' || pid <= 1) {
-            continue;
-        }
-
-        char link_path[64];
-        snprintf(link_path, sizeof(link_path), "/proc/%ld/exe", pid);
-
-        char exe_buf[PATH_MAX];
-        ssize_t n = readlink(link_path, exe_buf, sizeof(exe_buf) - 1);
-        if (n <= 0) {
-            continue;
-        }
-        exe_buf[n] = '\0';
-
-        std::string_view exe_view(exe_buf, n);
-        if (exe_view.ends_with(" (deleted)")) {
-            exe_view.remove_suffix(10);
-        }
-
-        if (exe_view == target_exe) {
-            LOGI("Found running zygote (PID %ld) prior to monitor attachment, terminating for late-load respawn", pid);
-            kill(static_cast<pid_t>(pid), SIGKILL);
-            break;
-        }
-    }
-    closedir(proc);
-}
-
-}  // namespace
-
-void AppMonitor::run() {
-    socket_handler_.Init();
-    ptrace_handler_.Init();
-    respawn_preexisting_zygote(zygote_.program_path_);
-    event_loop_.Init();
-    event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET);
     event_loop_.RegisterHandler(ptrace_handler_, EPOLLIN | EPOLLET);
+    if (!socket_handler_.Init()) {
+        LOGE("failed to initialise the control socket handler, exiting...");
+        return;
+    }
+    event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET);
     event_loop_.Loop();
 }
 
@@ -333,6 +302,23 @@ void AppMonitor::request_exit() {
     event_loop_.Stop();
 }
 
+void AppMonitor::request_rearm() {
+    LOGI("rearm requested");
+
+    // A rearm asks for injection, so lift a stop the monitor put itself into after a
+    // crash loop or a daemon that died with the previous root session.
+    if (tracing_state_ != TRACING) {
+        request_start();
+    }
+
+    if (!zygote_.rearm()) {
+        request_stop("rearm failed");
+        return;
+    }
+
+    update_status();
+}
+
 void AppMonitor::notify_init_detached() {
     tracing_state_ = STOPPED;
     LOGI("stop tracing init");
@@ -357,6 +343,13 @@ bool AppMonitor::SocketHandler::Init() {
     };
     sprintf(addr.sun_path, "%s/%s", zygiskd::GetTmpPath().c_str(), AppMonitor::SOCKET_NAME);
     socklen_t socklen = sizeof(sa_family_t) + strlen(addr.sun_path);
+    // A filesystem socket outlives the process that bound it, and the work directory
+    // outlives a root session, so the name can still be held by a monitor that is gone.
+    // Only one monitor may own it, and a live owner is kept out by the caller, which
+    // starts a monitor only when none answers, so an unbound name here is ours to claim.
+    if (unlink(addr.sun_path) == -1 && errno != ENOENT) {
+        PLOGE("unlink stale control socket %s", addr.sun_path);
+    }
     if (bind(sock_fd_, (struct sockaddr *) &addr, socklen) == -1) {
         PLOGE("bind socket");
         return false;
@@ -375,8 +368,9 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
             continue;
         }
         ssize_t real_size;
-        if (msg_header.cmd >= Command::DAEMON_SET_INFO &&
-            msg_header.cmd != Command::SYSTEM_SERVER_STARTED) {
+        // Only these two carry a payload; every other command is the bare enum value.
+        if (msg_header.cmd == Command::DAEMON_SET_INFO ||
+            msg_header.cmd == Command::DAEMON_SET_ERROR_INFO) {
             if (static_cast<size_t>(nread) < sizeof(MsgHead)) {
                 LOGE("SocketHandler: received incomplete header for cmd %d, size %zd",
                      msg_header.cmd, nread);
@@ -414,6 +408,9 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
             break;
         case EXIT:
             monitor_.request_exit();
+            break;
+        case REARM:
+            monitor_.request_rearm();
             break;
         case ZYGOTE_INJECTED:
             monitor_.get_abi_manager().notify_injected();
@@ -460,7 +457,12 @@ bool AppMonitor::SigChldHandler::Init() {
         PLOGE("create signalfd");
         return false;
     }
-    ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK);
+    // Only one process may trace init, so this is also what settles a race between two
+    // monitors starting at once: the one that loses cannot do its job and says so.
+    if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == -1) {
+        PLOGE("seize init");
+        return false;
+    }
     return true;
 }
 
@@ -784,15 +786,18 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
                     execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(),
                           nullptr);
                 } else {
-                    execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(), "--restart",
+                    execl(tracer, basename(tracer), "trace", std::to_string(pid).c_str(), "--spawn",
                           nullptr);
                 }
                 PLOGE("execute injector daemon");
-                kill(pid, SIGKILL);
+                // The target is parked in SIGSTOP waiting for an injector that will not
+                // arrive, so release it. Killing it feeds a zygote restart loop, which
+                // RescueParty answers by rebooting into the "wipe data" prompt.
+                kill(pid, SIGCONT);
                 _exit(1);
             } else if (p == -1) {
                 PLOGE("fork injector daemon");
-                kill(pid, SIGKILL);
+                kill(pid, SIGCONT);
             }
 
             handled = true;

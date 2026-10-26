@@ -117,6 +117,7 @@ public:
     void request_start();
     void request_stop(std::string reason);
     void request_exit();
+    void request_rearm();
     void notify_init_detached();
 
     // Public Accessors for owned components
