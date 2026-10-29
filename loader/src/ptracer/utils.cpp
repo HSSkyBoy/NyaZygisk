@@ -710,7 +710,9 @@ void wait_for_trace(int pid, int *status, int flags) {
         }
 
         // Check if the stop was caused by a PTRACE_EVENT_SECCOMP.
+        // The event itself is the point: raising it overwrote ptrace_message with zero.
         if (*status >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
+            LOGV("seccomp event on pid %d cleared its ptrace event message", pid);
             tracee_skip_syscall(pid);
             ptrace(PTRACE_CONT, pid, 0, 0);
             continue;  // Continue waiting for the next *real* stop event.
