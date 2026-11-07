@@ -21,7 +21,6 @@ allow zygote zygote capability sys_chroot
 allow zygote su dir search
 allow zygote su {lnk_file file} read
 
-allow domain adb_data_file dir search
 allow zygote zygote process execmem
 allow system_server system_server process execmem
 allow zygote tmpfs file *

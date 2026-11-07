@@ -30,7 +30,7 @@
 #include "solist.hpp"
 #include "zygisk.hpp"
 
-constexpr const char *kConfigPath = "/data/adb/nyazygisk/config.prop";
+constexpr const char *kConfigPath = "/data/system/nyazygisk/config.prop";
 
 void clean_libc_trace() {
     const auto status = Atexit::scrubFingerprint();

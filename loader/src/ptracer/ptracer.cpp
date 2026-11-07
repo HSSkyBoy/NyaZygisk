@@ -428,7 +428,7 @@ static bool wait_for_process(int pid, int *status) {
  * the normal path -- it only relocates the library, while the control socket stays where it
  * is, so it cannot on its own make an unreachable work directory usable.
  *
- * @param src_path The original path (e.g., /data/adb/nyazygisk/lib64/libzygisk.so)
+ * @param src_path The original path (e.g., /data/system/nyazygisk/lib64/libzygisk.so)
  * @return The path to the temporary file, or an empty string on failure.
  */
 [[maybe_unused]] static std::string copy_to_temp(const std::string &src_path) {

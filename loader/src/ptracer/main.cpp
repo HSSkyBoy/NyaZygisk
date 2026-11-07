@@ -27,7 +27,7 @@ using namespace std::string_view_literals;
 #ifdef WORK_DIRECTORY
 const char *const kWorkDirectory = STRINGIFY(WORK_DIRECTORY);
 #else
-const char *const kWorkDirectory = "/data/adb/nyazygisk";
+const char *const kWorkDirectory = "/data/system/nyazygisk";
 #endif
 
 // Fills in the address of the monitor's control socket.

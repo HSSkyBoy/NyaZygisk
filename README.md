@@ -58,7 +58,7 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 * Active modules labelled by type (`[Zygisk]` / `[Next]`) with their target process bindings.
 * Per-app module exclusion list for user apps.
 * Device information, including the vendor ROM version.
-* Settings, stored in `/data/adb/nyazygisk/config.prop`, that apply to app processes started afterwards (see [Experimental options](#experimental-options)).
+* Settings, stored in `/data/system/nyazygisk/config.prop`, that apply to app processes started afterwards (see [Experimental options](#experimental-options)).
 
 ### Experimental options
 

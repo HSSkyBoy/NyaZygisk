@@ -1,6 +1,6 @@
 // Exercises the real is_custom_linker_enabled() / is_anonymous_memory_enabled()
 // (clean.cpp) against an actual config.prop at the hardcoded path they read
-// (kConfigPath = /data/adb/nyazygisk/config.prop) — safe to create for real
+// (kConfigPath = /data/system/nyazygisk/config.prop) — safe to create for real
 // inside this chroot. Links clean.cpp directly, same as spoof_rwx_test.cpp.
 #include <stdio.h>
 #include <sys/stat.h>
@@ -14,8 +14,8 @@ void Check(const char* what, bool ok) {
     if (!ok) g_failures++;
 }
 
-constexpr const char* kConfigDir = "/data/adb/nyazygisk";
-constexpr const char* kConfigPath = "/data/adb/nyazygisk/config.prop";
+constexpr const char* kConfigDir = "/data/system/nyazygisk";
+constexpr const char* kConfigPath = "/data/system/nyazygisk/config.prop";
 
 void WriteConfig(const char* contents) {
     remove(kConfigPath);
@@ -31,7 +31,7 @@ void WriteConfig(const char* contents) {
 }  // namespace
 
 int main() {
-    mkdir("/data/adb", 0755);  // mkdir doesn't create parents; the rootfs may lack this
+    mkdir("/data/system", 0755);  // mkdir doesn't create parents; the rootfs may lack this
     mkdir(kConfigDir, 0755);
 
     printf("== custom_linker: opt-in semantics\n");
