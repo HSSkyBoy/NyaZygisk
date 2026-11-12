@@ -7,12 +7,16 @@
 # A hot install re-runs no boot stage, so without this nothing would ever start the new
 # monitor. Replacing it is only half an update: zygote and every app forked from it still
 # have the previous libzygisk.so mapped, and a mapped library cannot be swapped under a
-# running process. The injector therefore changes only when zygote restarts, which is why
-# this ends with one. That restart leaves the kernel module loaded, so a temp root
-# survives it, and it is far cheaper than the reboot an update would otherwise need.
+# running process. The injector therefore changes only when zygote restarts.
+# The new monitor is armed and running processes stay undisturbed; the new
+# injector is picked up whenever zygote next restarts.
 
 MODDIR=${0%/*}
 if [ "$ZYGISK_ENABLED" ]; then
+  exit 0
+fi
+
+if [ -f "$MODDIR/disable" ]; then
   exit 0
 fi
 
@@ -56,8 +60,6 @@ if ! "$TRACER" ctl rearm; then
   exit 1
 fi
 
-# No pause between the two: init clears the disabled flag that stop set even while the
-# service is still running, and restarts it when it is finally reaped. Backgrounded only so
-# the installer is not taken down by the framework it is reporting through.
-echo "- Restarting zygote to load the new injector"
-( stop; start ) </dev/null >/dev/null 2>&1 &
+# The monitor is armed, so the next zygote to start carries the new injector while the
+# one running now keeps the old one.
+echo "- The new monitor is armed; zygote keeps the running injector until it restarts"

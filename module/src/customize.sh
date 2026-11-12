@@ -208,8 +208,8 @@ if [ "$HUAWEI_MAPLE_ENABLED" == "1" ]; then
 fi
 
 # NeoZygisk is binaries and scripts only, so none of what it installs waits for a boot
-# stage: hotinstall.sh replaces the running monitor and restarts zygote, which is all an
-# update needs. The Maple workaround above is the one exception. KernelSU loads a
+# stage: hotinstall.sh replaces the running monitor, which is all an update needs.
+# The Maple workaround above is the one exception. KernelSU loads a
 # system.prop from post-fs-data and from late load, but its hot-install path deliberately
 # loads none, so a build that wrote one has to take the reboot.
 if [ "$KSU" ] && [ ! -f "$MODPATH/system.prop" ]; then
