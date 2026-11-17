@@ -165,6 +165,7 @@ void *Dlopen(int fd, const char *name, bool anonymous, LoadError *err);
 void *Dlsym(void *handle, const char *name);
 bool Dlclose(void *handle);
 bool IsOurHandle(void *handle);
+bool HasLoadedImages();
 
 // Internal helpers shared with interpose.cpp. Not part of the module-facing API.
 Image *FindImageByAddress(const void *addr);

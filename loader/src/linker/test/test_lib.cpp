@@ -71,6 +71,21 @@ int tl_throw_catch() {
     return -2;
 }
 
+// Verify that g_images is populated BEFORE .init_array runs, so both dladdr(self)
+// and C++ exception unwinding (dl_iterate_phdr) work inside static constructors.
+static int g_ctor_interpose_ok = 0;
+struct CtorInterposeProbe {
+    CtorInterposeProbe() {
+        Dl_info info{};
+        bool dladdr_ok = dladdr(reinterpret_cast<void*>(&tl_get42), &info) != 0 &&
+                         info.dli_sname != nullptr && strcmp(info.dli_sname, "tl_get42") == 0;
+        bool exc_ok = tl_throw_catch() == 7;
+        g_ctor_interpose_ok = (dladdr_ok && exc_ok) ? 1 : -1;
+    }
+};
+static CtorInterposeProbe g_ctor_interpose_probe;
+int tl_ctor_interpose_ok() { return g_ctor_interpose_ok; }
+
 // --- weak undefined symbol -------------------------------------------------
 // Resolves to nullptr when absent; the loader must leave it 0, not fail.
 __attribute__((weak)) extern void tl_missing_weak(void);

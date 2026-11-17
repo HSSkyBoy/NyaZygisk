@@ -22,6 +22,7 @@
 #include "elf_util.h"
 #include "logging.hpp"
 #include "module.hpp"
+#include "module_loader.hpp"
 #include "tracer_pid.hpp"
 #include "zygisk.hpp"
 
@@ -245,19 +246,33 @@ DCL_HOOK_FUNC(int, property_get, const char *key, char *value, const char *defau
 DCL_HOOK_FUNC(static int, pthread_attr_setstacksize, void *target, size_t size) {
     int res = old_pthread_attr_setstacksize((pthread_attr_t *) target, size);
 
-    if (g_hook->should_unmap && gettid() == getpid()) {
+    if (g_hook != nullptr && g_hook->should_unmap && gettid() == getpid()) {
         // Only perform unloading on the main thread
 
         g_hook->restore_plt_hook();
+        if (modloader::HasLoadedImages()) {
+            // Surviving custom-linker modules bind dl_iterate_phdr / dladdr / dlsym /
+            // dlclose through their GOT to interpose.cpp inside libzygisk.so, and those
+            // routines consult g_images in linker.cpp. Unmapping ourselves would leave
+            // dangling function pointers that fault as soon as the module unwinds an
+            // exception or calls dladdr/dlsym (issue #76).
+            LOGV("keep libzygisk.so mapped: custom-linker module(s) still resident");
+            g_hook->should_unmap = false;
+        }
+        if (g_hook->should_spoof_maps && g_hook->anonymous_memory_enabled) {
+            spoof_module_maps(true);
+            if (!g_hook->should_unmap) {
+                // Our own .data/.bss (g_images, its mutex) must stay writable.
+                spoof_virtual_maps("libzygisk.so", /*private_only=*/true,
+                                   /*clear_write_permission=*/false);
+            }
+        }
         if (g_hook->should_unmap) {
             void *start_addr = g_hook->start_addr;
             size_t block_size = g_hook->block_size;
 
-            if (g_hook->should_spoof_maps && g_hook->anonymous_memory_enabled) {
-                spoof_module_maps(true);
-            }
-
             delete g_hook;
+            g_hook = nullptr;
             // Because both `pthread_attr_setstacksize` and `munmap` have the same function
             // signature, we can use `musttail` to let the compiler reuse our stack frame and thus
             // `munmap` will directly return to the caller of `pthread_attr_setstacksize`.
@@ -265,6 +280,7 @@ DCL_HOOK_FUNC(static int, pthread_attr_setstacksize, void *target, size_t size) 
             [[clang::musttail]] return munmap(start_addr, block_size);
         }
         delete g_hook;
+        g_hook = nullptr;
     }
 
     return res;

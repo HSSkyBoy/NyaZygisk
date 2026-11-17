@@ -131,6 +131,7 @@ static std::string MapsPathAt(uintptr_t addr) {
 
 int ExerciseCustom(const char* path, bool anonymous) {
     printf("== custom linker (%s): %s\n", anonymous ? "anonymous" : "file-backed", path);
+    Check("HasLoadedImages false before Dlopen", !linker::HasLoadedImages());
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         printf("  cannot open %s\n", path);
@@ -143,6 +144,7 @@ int ExerciseCustom(const char* path, bool anonymous) {
         printf("  Dlopen failed (err=%d)\n", static_cast<int>(err));
         return 1;
     }
+    Check("HasLoadedImages true while loaded", linker::HasLoadedImages());
 
     auto get42 = Sym<int (*)()>(h, "tl_get42", true);
     Check("tl_get42==42", get42 && get42() == 42);
@@ -156,6 +158,10 @@ int ExerciseCustom(const char* path, bool anonymous) {
     auto order = Sym<const char* (*)()>(h, "tl_ctor_order", true);
     Check("constructors ran in order", order && strcmp(order(), "12") == 0,
           order ? order() : "");
+
+    auto ctor_interpose = Sym<int (*)()>(h, "tl_ctor_interpose_ok", true);
+    Check("dladdr and exception unwind inside .init_array",
+          ctor_interpose && ctor_interpose() == 1);
 
     auto thr = Sym<int (*)()>(h, "tl_throw_catch", true);
     Check("C++ exception unwinds via interpose", thr && thr() == 7);
@@ -193,6 +199,7 @@ int ExerciseCustom(const char* path, bool anonymous) {
 
     bool closed = linker::Dlclose(h);
     Check("Dlclose succeeds", closed);
+    Check("HasLoadedImages false after Dlclose", !linker::HasLoadedImages());
     Check("static destructors ran in reverse order",
           g_dtor_n == 2 && g_dtor_seq[0] == 2 && g_dtor_seq[1] == 1);
     return 0;

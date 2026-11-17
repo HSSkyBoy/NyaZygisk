@@ -832,12 +832,14 @@ Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
         return nullptr;
     }
     img->ApplyRelro();
-    img->CallConstructors();
 
+    // Register before running constructors so dladdr / dl_iterate_phdr (e.g.
+    // C++ exception unwinding) inside .init_array can already see this image.
     {
         std::lock_guard<std::mutex> lk(g_images_lock);
         g_images.push_back(img);
     }
+    img->CallConstructors();
     return img;
 }
 
@@ -902,6 +904,11 @@ bool IsOurHandle(void *handle) {
         if (i == handle) return true;
     }
     return false;
+}
+
+bool HasLoadedImages() {
+    std::lock_guard<std::mutex> lk(g_images_lock);
+    return !g_images.empty();
 }
 
 // Used by interpose.cpp's dladdr override.
