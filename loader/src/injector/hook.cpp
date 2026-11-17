@@ -261,11 +261,18 @@ DCL_HOOK_FUNC(static int, pthread_attr_setstacksize, void *target, size_t size) 
         }
         if (g_hook->should_spoof_maps && g_hook->anonymous_memory_enabled) {
             spoof_module_maps(true);
-            if (!g_hook->should_unmap) {
-                // Our own .data/.bss (g_images, its mutex) must stay writable.
-                spoof_virtual_maps("libzygisk.so", /*private_only=*/true,
-                                   /*clear_write_permission=*/false);
-            }
+        }
+        if (!g_hook->should_unmap && g_hook->anonymous_memory_enabled) {
+            // Anonymize our own mappings regardless of should_spoof_maps: we stay
+            // resident, so the libzygisk.so path would otherwise remain in maps.
+            // Hold the image lock so resident modules cannot write our .data
+            // (g_images) mid copy-and-mremap. Our .data/.bss must stay writable.
+            modloader::WithImagesLocked(
+                [](void *) {
+                    spoof_virtual_maps("libzygisk.so", /*private_only=*/true,
+                                       /*clear_write_permission=*/false);
+                },
+                nullptr);
         }
         if (g_hook->should_unmap) {
             void *start_addr = g_hook->start_addr;

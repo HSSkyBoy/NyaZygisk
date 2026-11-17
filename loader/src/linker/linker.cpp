@@ -911,6 +911,11 @@ bool HasLoadedImages() {
     return !g_images.empty();
 }
 
+void WithImagesLocked(void (*fn)(void *), void *arg) {
+    std::lock_guard<std::mutex> lk(g_images_lock);
+    fn(arg);
+}
+
 // Used by interpose.cpp's dladdr override.
 Image *FindImageByAddress(const void *addr) {
     std::lock_guard<std::mutex> lk(g_images_lock);

@@ -29,4 +29,7 @@ bool IsCustom(void *handle);
 // binds dl_iterate_phdr / dladdr / dlsym / dlclose to our interpose table.
 bool HasLoadedImages();
 
+// Run fn(arg) with the custom linker's image registry locked.
+void WithImagesLocked(void (*fn)(void *), void *arg);
+
 }  // namespace modloader

@@ -166,6 +166,9 @@ void *Dlsym(void *handle, const char *name);
 bool Dlclose(void *handle);
 bool IsOurHandle(void *handle);
 bool HasLoadedImages();
+// Run fn(arg) while holding the image-registry lock, so no interposed
+// dl_iterate_phdr/dladdr/dlsym/dlclose can touch our data concurrently.
+void WithImagesLocked(void (*fn)(void *), void *arg);
 
 // Internal helpers shared with interpose.cpp. Not part of the module-facing API.
 Image *FindImageByAddress(const void *addr);
