@@ -11,11 +11,11 @@ TMP_PATH=@WORK_DIRECTORY@
 
 # The work directory has to be traversable by uid 1000: a late-injected system_server
 # dlopens the library and connects to the control socket in its own context, and that is a
-# DAC check which no SELinux setting relaxes. Hence system:system ownership and a mode that
-# grants search to all. Root still writes here through CAP_DAC_OVERRIDE.
+# DAC check which no SELinux setting relaxes. Hence system:system ownership and 0550 so only
+# root (via CAP_DAC_OVERRIDE) and system may traverse or list it.
 create_sys_perm() {
   mkdir -p "$1"
-  chmod 555 "$1"
+  chmod 0550 "$1"
   chcon u:object_r:system_file:s0 "$1"
   chown system:system "$1"
 }
@@ -30,7 +30,7 @@ install_lib() {
   [ -f "$src" ] || return 0
   create_sys_perm "${dst%/*}"
   cp -f "$src" "$dst.new" || return 1
-  chmod 644 "$dst.new"
+  chmod 0644 "$dst.new"
   chcon u:object_r:system_file:s0 "$dst.new"
   chown system:system "$dst.new"
   mv -f "$dst.new" "$dst"
@@ -46,9 +46,11 @@ FIRST_INIT=false
 create_sys_perm "$TMP_PATH"
 if [ "$FIRST_INIT" = true ] && [ ! -f "$TMP_PATH/spoof.prop" ] && [ -f "$MODDIR/spoof.prop" ]; then
   cp -af "$MODDIR/spoof.prop" "$TMP_PATH/spoof.prop"
-  chmod 644 "$TMP_PATH/spoof.prop"
+fi
+if [ -f "$TMP_PATH/spoof.prop" ]; then
+  chmod 0600 "$TMP_PATH/spoof.prop"
   chcon u:object_r:system_file:s0 "$TMP_PATH/spoof.prop"
-  chown 0:0 "$TMP_PATH/spoof.prop"
+  chown root:root "$TMP_PATH/spoof.prop"
 fi
 
 install_lib "$MODDIR/lib64/libzygisk.so" "$TMP_PATH/lib64/libzygisk.so"
