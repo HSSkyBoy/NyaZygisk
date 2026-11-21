@@ -4,15 +4,14 @@
 
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
-allow domain zygisk_file dir {search getattr}
-allow domain zygisk_file sock_file {read write getattr open}
+allow zygote zygisk_file sock_file {read write getattr}
 
 # Late load injects a system_server that is already running, and the injected library
 # pings the daemon before any mode-specific work, returning when that fails. It connects
 # as u:r:system_server:s0, so it needs the socket file and the listening socket. The
 # daemon creates that socket with the context u:r:zygote:s0, which is why connectto names
 # zygote rather than the daemon's own domain.
-allow system_server zygisk_file sock_file {read write}
+allow system_server zygisk_file sock_file {read write getattr}
 allow system_server zygote unix_stream_socket connectto
 
 allow zygote magisk lnk_file read
@@ -22,14 +21,10 @@ allow zygote su dir search
 allow zygote su {lnk_file file} read
 
 allow zygote zygote process execmem
-allow system_server system_server process execmem
 allow zygote tmpfs file *
 allow zygote appdomain_tmpfs file *
-allow domain tmpfs file {open getattr map read execute}
 allow zygote magisk memfd_file {getattr read write map execute}
 allow zygote su memfd_file {getattr read write map execute}
-allow domain magisk memfd_file {getattr read write map execute}
-allow domain su memfd_file {getattr read write map execute}
 allow zygote proc file *
 allow zygote nsfs file *
 
@@ -45,6 +40,8 @@ allow system_server tmpfs file {getattr read write map execute}
 allow system_server magisk memfd_file {getattr read write map execute}
 allow system_server su memfd_file {getattr read write map execute}
 
-# The JIT cache the injected library creates for itself is labelled after its creator, so
-# in system_server it is system_server_tmpfs rather than the tmpfs above.
+# Executable stub pages and JIT caches created inside system_server are backed by memfd so
+# system_server never needs process execmem (probed by DirtySepolicy). Their label follows
+# the creator: system_server_tmpfs on older kernels and system_server memfd_file on newer ones.
 allow system_server system_server_tmpfs file {getattr read write map execute}
+allow system_server system_server memfd_file {getattr read write map execute}

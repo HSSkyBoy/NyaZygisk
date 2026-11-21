@@ -1,11 +1,14 @@
 #include "zn_hook.hpp"
 
 #include <dlfcn.h>
+#include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -199,6 +202,38 @@ private:
 #endif
     }
 
+    static bool mapCodeViaMemfd(uintptr_t code_base, size_t pg) {
+        int mfd = static_cast<int>(syscall(__NR_memfd_create, "jit-cache", MFD_CLOEXEC));
+        if (mfd < 0) {
+            PLOGE("ZN hook: memfd_create for stub slab failed");
+            return false;
+        }
+        const auto* src = reinterpret_cast<const uint8_t*>(code_base);
+        size_t written = 0;
+        while (written < pg) {
+            ssize_t n = write(mfd, src + written, pg - written);
+            if (n > 0) {
+                written += static_cast<size_t>(n);
+            } else if (n < 0 && errno == EINTR) {
+                continue;
+            } else {
+                PLOGE("ZN hook: write stub slab memfd failed");
+                close(mfd);
+                return false;
+            }
+        }
+        void* rx = mmap(reinterpret_cast<void*>(code_base), pg, PROT_READ | PROT_EXEC,
+                        MAP_PRIVATE | MAP_FIXED, mfd, 0);
+        close(mfd);
+        if (rx == MAP_FAILED) {
+            PLOGE("ZN hook: mmap(PROT_READ|PROT_EXEC) stub slab memfd failed");
+            return false;
+        }
+        __builtin___clear_cache(reinterpret_cast<char*>(code_base),
+                                reinterpret_cast<char*>(code_base + pg));
+        return true;
+    }
+
     static bool allocateSlabLocked() {
         long raw_pg = sysconf(_SC_PAGESIZE);
         const size_t pg = raw_pg > 0 ? static_cast<size_t>(raw_pg) : 4096;
@@ -228,9 +263,13 @@ private:
                                 reinterpret_cast<char*>(code_base + pg));
 
         if (mprotect(reinterpret_cast<void*>(code_base), pg, PROT_READ | PROT_EXEC) != 0) {
-            PLOGE("ZN hook: mprotect(PROT_READ|PROT_EXEC) on stub slab failed");
-            munmap(mem, pg * 2);
-            return false;
+            // Restricted domains such as system_server deny anonymous execmem; fall back to
+            // a file-backed RX mapping from a closed memfd ("jit-cache") while preserving
+            // the adjacent anonymous RW slot page at code_base + pg.
+            if (!mapCodeViaMemfd(code_base, pg)) {
+                munmap(mem, pg * 2);
+                return false;
+            }
         }
 
         register_cfi_unchecked(code_base, pg);
