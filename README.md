@@ -30,7 +30,7 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 
 * **Magisk Zygisk API v5:** full compatibility with modules built for [Magisk's built-in Zygisk](https://github.com/topjohnwu/Magisk/tree/master/native/src/core/zygisk).
 * **Zygisk Next API v4:** loads modules declared in `zn_modules.txt`, providing:
-  * `inlineHook` via [Dobby](https://github.com/LSPosed/Dobby) and `pltHook` via [LSPlt](https://github.com/LSPosed/LSPlt);
+  * `inlineHook` via [Dobby](https://github.com/LSPosed/Dobby) and `pltHook` via [YukiPLT](https://github.com/Rouyashiki/YukiPLT) (default), [ByteHook](https://github.com/bytedance/bhook), or [LSPlt](https://github.com/LSPosed/LSPlt);
   * ELF symbol resolution, including `.gnu_debugdata` LZMA decompression for stripped system libraries;
   * companion processes hosted by the root daemon (`zygiskd`).
 * **HyperOS Runtime API v1:** application callbacks for modules targeting Xiaomi's `hyos_spawner`.
