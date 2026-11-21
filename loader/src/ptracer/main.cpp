@@ -149,10 +149,11 @@ static volatile sig_atomic_t g_traced_pid = 0;
  * @brief Signal handler to safely detach and resume Zygote if the user
  *        interrupts the standalone tracer (e.g., Ctrl+C).
  */
-static void handle_interrupt(int sig) {
+static void handle_interrupt(int /*sig*/) {
     if (g_traced_pid > 0) {
-        printf("\n[!] received signal %d, safely detaching from PID %d to prevent crash...\n", sig,
-               (int) g_traced_pid);
+        static constexpr char msg[] =
+            "\n[!] received interrupt signal, detaching from tracee to prevent crash...\n";
+        (void) write(STDERR_FILENO, msg, sizeof(msg) - 1);
 
         // PTRACE_DETACH with SIGCONT ensures the process resumes execution
         ptrace(PTRACE_DETACH, (pid_t) g_traced_pid, 0, SIGCONT);

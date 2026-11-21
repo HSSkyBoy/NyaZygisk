@@ -155,7 +155,7 @@ private:
     private:
         void handleChildEvent(int pid, int &status);
         void handleParentEvent(int pid, int &status);
-        void handleNewProcess(int pid);
+        void handleNewProcess(int pid, int status);
         void handleTracedProcess(int pid, int &status);
 
         // returns true if process was promoted/injected, false if it should be detached

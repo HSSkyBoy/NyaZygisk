@@ -16,35 +16,6 @@
 
 namespace {
 
-/**
- * @brief Tests whether a running app_process is a zygote and not some other program that
- *        happens to run under the same interpreter.
- *
- * The executable and init parentage together are not enough. Anything launched from a
- * boot script that backgrounds itself is reparented to init, and a root framework's
- * daemon is typically app_process under a --nice-name of its own, which then looks exactly
- * like a zygote and gets the zygote hooks installed into it.
- *
- * argv settles it, in either of the two shapes a zygote has: init launches it with
- * --zygote on the command line, and it later overwrites argv[0] with "zygote64". comm is
- * no help, staying "main" through both.
- */
-bool is_zygote_cmdline(pid_t pid) {
-    auto argv = read_cmdline(pid);
-    if (argv.empty()) return false;
-
-    std::string_view name = argv.front();
-    if (auto slash = name.rfind('/'); slash != std::string_view::npos) {
-        name.remove_prefix(slash + 1);
-    }
-    if (name.starts_with("zygote")) return true;
-
-    for (const auto& arg : argv) {
-        if (arg == "--zygote") return true;
-    }
-    return false;
-}
-
 // The daemon frames its status strings with a length that counts the terminator, so the
 // payload carries a trailing NUL. Strip it here, where both senders converge, to keep the
 // status file plain text.
@@ -68,6 +39,9 @@ const Status& ZygoteAbiManager::get_status() const { return status_; }
 
 void ZygoteAbiManager::notify_injected() {
     status_.zygote_injected = true;
+}
+
+void ZygoteAbiManager::notify_system_server_started() {
     counter.count = 0;
 }
 
@@ -94,6 +68,10 @@ bool ZygoteAbiManager::is_in_crash_loop() {
 
 bool ZygoteAbiManager::ensure_daemon_created(bool* started) {
     if (started) *started = false;
+    if (status_.daemon_pid != -1 && kill(status_.daemon_pid, 0) == -1 && errno == ESRCH) {
+        status_.daemon_pid = -1;
+        status_.daemon_running = false;
+    }
     if (status_.daemon_pid == -1) {
         auto pid = fork();
         if (pid < 0) {
@@ -115,7 +93,7 @@ bool ZygoteAbiManager::ensure_daemon_created(bool* started) {
             execl(daemon_path_.c_str(), daemon_path_.c_str(), "--workdir",
                   zygiskd::GetTmpPath().c_str(), nullptr);
             PLOGE("exec daemon %s", daemon_path_.c_str());
-            exit(1);
+            _exit(1);
         }
         status_.supported = true;
         status_.daemon_pid = pid;

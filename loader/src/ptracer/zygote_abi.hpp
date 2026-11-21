@@ -20,7 +20,7 @@ class AppMonitor;
 class ZygoteAbiManager {
 public:
     static constexpr int CRASH_LOOP_RETRY_COUNT = 5;
-    static constexpr int CRASH_LOOP_WINDOW_SECONDS = 30;
+    static constexpr int CRASH_LOOP_WINDOW_SECONDS = 60;
 
     ZygoteAbiManager(AppMonitor& monitor, bool is_64bit);
 
@@ -43,6 +43,7 @@ public:
     // Public methods for state modification
     const Status& get_status() const;
     void notify_injected();
+    void notify_system_server_started();
     void set_daemon_info(std::string_view info);
     void set_daemon_crashed(std::string_view error);
 

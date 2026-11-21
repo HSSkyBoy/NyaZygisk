@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "daemon.hpp"
@@ -40,9 +41,15 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
     regs.pstate &= ~(3ULL << 10);
 #endif
 
+    // Reserve red-zone/scratch slack below the interrupted frame before pushing arguments.
+    regs.REG_SP = (regs.REG_SP - 256) & ~uintptr_t{0xf};
+
     auto map = MapInfo::Scan(std::to_string(pid));
     auto local_map = MapInfo::Scan();
     auto libc_return_addr = find_module_return_addr(map, "libc.so");
+    if (libc_return_addr == nullptr) {
+        libc_return_addr = reinterpret_cast<void *>(0xdead0000);
+    }
 
     // Remotely call dlopen(lib_path, RTLD_NOW)
     LOGV("executing remote call to dlopen(\"%s\")", lib_path);
@@ -53,6 +60,7 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
     }
     std::vector<long> args;
     auto remote_lib_path = push_string(pid, regs, lib_path);
+    if (remote_lib_path == 0) return false;
     args.push_back((long) remote_lib_path);
     args.push_back((long) RTLD_NOW);
     auto remote_handle =
@@ -89,14 +97,13 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
         auto dlerror_len =
             remote_call(pid, regs, (uintptr_t) strlen_addr, (uintptr_t) libc_return_addr, args);
 
-        if (dlerror_len <= 0) {
+        if (dlerror_len == 0 || dlerror_len > 4096) {
             LOGE("dlerror string length is invalid (%" PRIuPTR ")", dlerror_len);
             return false;
         }
 
-        // Read the actual error string from system_server's memory
-        std::string err;
-        err.resize(dlerror_len + 1, 0);
+        // Read the actual error string from the target process memory
+        std::string err(dlerror_len, '\0');
         read_proc(pid, (uintptr_t) dlerror_str_addr, err.data(), dlerror_len);
 
         LOGE("dlopen error: %s", err.c_str());
@@ -114,6 +121,7 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
     }
     args.clear();
     auto remote_entry_str = push_string(pid, regs, "entry");
+    if (remote_entry_str == 0) return false;
     args.push_back(remote_handle);
     args.push_back((long) remote_entry_str);
     auto injector_entry =
@@ -145,10 +153,16 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
         }
     }
     if (lib_inode != 0) {
+        uintptr_t min_start = UINTPTR_MAX;
+        uintptr_t max_end = 0;
         for (const auto &info : map) {
             if (info.dev != lib_dev || info.inode != lib_inode) continue;
-            if (start_addr == nullptr) start_addr = (void *) info.start;
-            block_size += (info.end - info.start);
+            if (info.start < min_start) min_start = info.start;
+            if (info.end > max_end) max_end = info.end;
+        }
+        if (min_start < max_end) {
+            start_addr = reinterpret_cast<void *>(min_start);
+            block_size = max_end - min_start;
         }
     }
     LOGV("found injected library mapped from %p with total size %zu [dev %u:%u inode %lu]",
@@ -160,6 +174,7 @@ static bool execute_remote_injection(int pid, struct user_regs_struct &regs, con
     args.push_back((uintptr_t) start_addr);
     args.push_back(block_size);
     auto remote_tmp_path = push_string(pid, regs, zygiskd::GetTmpPath().c_str());
+    if (remote_tmp_path == 0) return false;
     args.push_back((long) remote_tmp_path);
     args.push_back(mode);
     // entry() returns void, so only `ok` tells a clean return from a crash inside it. A
@@ -223,8 +238,13 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     LOGV("reading kernel argument block from stack pointer: 0x%lx", (unsigned long) regs.REG_SP);
     auto sp = static_cast<uintptr_t>(regs.REG_SP);
 
-    int argc;
-    read_proc(pid, sp, &argc, sizeof(argc));
+    uintptr_t raw_argc = 0;
+    if (read_proc(pid, sp, &raw_argc, sizeof(raw_argc)) != static_cast<ssize_t>(sizeof(raw_argc)) ||
+        raw_argc > 4096) {
+        LOGE("failed to read valid argc from PID %d stack", pid);
+        return false;
+    }
+    int argc = static_cast<int>(raw_argc);
 
     auto argv = reinterpret_cast<char **>(sp + sizeof(uintptr_t));
     auto envp = argv + argc + 1;
@@ -232,14 +252,23 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     // Iterate past the environment variables to find the start of the auxiliary vector.
     // The end of envp is marked by a null pointer.
     auto p = envp;
-    while (true) {
-        uintptr_t val;
-        read_proc(pid, (uintptr_t) p, &val, sizeof(val));
+    bool found_env_end = false;
+    for (size_t i = 0; i < 4096; ++i) {
+        uintptr_t val = 0;
+        if (read_proc(pid, (uintptr_t) p, &val, sizeof(val)) != static_cast<ssize_t>(sizeof(val))) {
+            LOGE("failed to read envp entry for PID %d", pid);
+            return false;
+        }
         if (val != 0) {
             p++;
         } else {
+            found_env_end = true;
             break;
         }
+    }
+    if (!found_env_end) {
+        LOGE("envp terminator not found within limit for PID %d", pid);
+        return false;
     }
     p++;  // Skip the final null pointer to get to auxv.
     auto auxv = reinterpret_cast<ElfW(auxv_t) *>(p);
@@ -250,9 +279,12 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     uintptr_t entry_addr = 0;
     uintptr_t addr_of_entry_addr = 0;
     auto v = auxv;
-    while (true) {
-        ElfW(auxv_t) buf;
-        read_proc(pid, (uintptr_t) v, &buf, sizeof(buf));
+    for (size_t i = 0; i < 4096; ++i) {
+        ElfW(auxv_t) buf{};
+        if (read_proc(pid, (uintptr_t) v, &buf, sizeof(buf)) != static_cast<ssize_t>(sizeof(buf))) {
+            LOGE("failed to read auxv entry for PID %d", pid);
+            return false;
+        }
         if (buf.a_type == AT_NULL) {
             break;  // End of auxiliary vector.
         }
@@ -271,48 +303,53 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     }
     LOGI("found program entry point at 0x%" PRIxPTR, entry_addr);
 
-    // --- Step 3: Hijack Execution Flow ---
-    // We replace the program's entry point with an invalid address. This causes a SIGSEGV
-    // as soon as we resume the process, allowing us to regain control at the perfect time.
-    LOGV("hijacking entry point to intercept execution");
+    // --- Step 3: Intercept Entry Point ---
+    // Temporarily replace AT_ENTRY with a sentinel address so the process traps at entry.
+    LOGV("setting entry point breakpoint to intercept execution");
     // For arm32 compatibility, we set the last bit to the same as the entry address.
-    uintptr_t break_addr = (-0x05ec1cff & ~1) | (entry_addr & 1);  // An arbitrary invalid address.
-    if (!write_proc(pid, addr_of_entry_addr, &break_addr, sizeof(break_addr))) {
-        LOGE("failed to write hijack address to PID %d, injection aborted", pid);
+    uintptr_t break_addr = (-0x05ec1cff & ~1) | (entry_addr & 1);
+    if (write_proc(pid, addr_of_entry_addr, &break_addr, sizeof(break_addr)) !=
+        static_cast<ssize_t>(sizeof(break_addr))) {
+        LOGE("failed to write entry breakpoint to PID %d, injection aborted", pid);
         return false;
     }
 
-    int status;
+    struct EntryRestoreGuard {
+        int pid;
+        uintptr_t addr;
+        uintptr_t orig;
+        bool active = true;
+        ~EntryRestoreGuard() {
+            if (active) {
+                write_proc(pid, addr, &orig, sizeof(orig));
+            }
+        }
+    } entry_guard{pid, addr_of_entry_addr, entry_addr};
 
+    int status = 0;
+    int forward_sig = 0;
     while (true) {
-        // Resume execution. We pass 0 to signal to suppress any pending SIGSTOPs.
-        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
+        if (ptrace(PTRACE_CONT, pid, 0, forward_sig) == -1) {
             PLOGE("ptrace(PTRACE_CONT) failed");
             return false;
         }
+        forward_sig = 0;
 
-        wait_for_trace(pid, &status, __WALL);
-
-        // 1. Handle Process Death
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            LOGE("process died unexpectedly: %s", parse_status(status).c_str());
+        if (!wait_for_trace(pid, &status, __WALL)) {
             return false;
         }
 
-        // 2. Handle Stops
         if (WIFSTOPPED(status)) {
             int sig = WSTOPSIG(status);
-
             if (sig == SIGSEGV) {
-                // SUCCESS: We hit our trap.
                 break;
             } else if (sig == SIGSTOP) {
-                // NOISE: Spurious stop from PTRACE_ATTACH. Ignore and continue.
                 continue;
             } else {
-                // ERROR: Unexpected signal (e.g., SIGILL, SIGBUS). Abort.
-                LOGE("process stopped for unexpected signal: %d", sig);
-                return false;
+                // Forward non-fatal async signals (e.g. SIGCHLD) instead of aborting early.
+                LOGV("forwarding pre-entry signal %d to PID %d", sig, pid);
+                forward_sig = sig;
+                continue;
             }
         }
     }
@@ -324,8 +361,8 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     }
     // Sanity check: ensure we stopped at our invalid address.
     if (static_cast<uintptr_t>(regs.REG_IP & ~1) != (break_addr & ~1)) {
-        LOGE("process stopped at unexpected address 0x%lx, expected ~0x%" PRIxPTR, regs.REG_IP,
-             break_addr);
+        LOGE("process stopped at unexpected address 0x%lx, expected ~0x%" PRIxPTR,
+             (unsigned long) regs.REG_IP, break_addr);
         return false;
     }
 
@@ -333,7 +370,9 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
 
     // --- Step 4: Remote Code Execution ---
     // First, restore the original entry point in memory.
-    if (!write_proc(pid, addr_of_entry_addr, &entry_addr, sizeof(entry_addr))) {
+    entry_guard.active = false;
+    if (write_proc(pid, addr_of_entry_addr, &entry_addr, sizeof(entry_addr)) !=
+        static_cast<ssize_t>(sizeof(entry_addr))) {
         LOGE("FATAL: failed to restore original entry point, process %d will not recover", pid);
         return false;
     }
@@ -343,20 +382,18 @@ bool inject_before_start(int pid, const char *lib_path, TraceMode mode) {
     // the original executable can securely validate its own BTI pad upon final resume.
     memcpy(&backup, &regs, sizeof(regs));
 
-    if (!execute_remote_injection(pid, regs, lib_path, mode)) {
-        return false;
-    }
+    bool ok = execute_remote_injection(pid, regs, lib_path, mode);
 
     // --- Step 5: Restore State ---
-    // Set the instruction pointer back to the original entry address and restore all registers.
+    // Always restore original registers (even on injection failure) so the process can resume cleanly.
     backup.REG_IP = (long) entry_addr;
-    LOGI("injection complete, restoring registers before resuming normal execution");
+    LOGI("restoring registers before resuming normal execution");
     if (!set_regs(pid, backup)) {
         LOGE("failed to restore original registers for PID %d", pid);
         return false;
     }
 
-    return true;
+    return ok;
 }
 
 bool inject_after_start(int pid, const char *lib_path, TraceMode mode) {
@@ -387,13 +424,61 @@ bool inject_after_start(int pid, const char *lib_path, TraceMode mode) {
     regs.uregs[0] = 0;
 #elif defined(__aarch64__)
     regs.regs[0] = 0;  // Clear x0 to prevent -ERESTARTSYS match in kernel
+#elif defined(__riscv) && __riscv_xlen == 64
+    regs.a0 = 0;
 #endif
+
+    // Defer async signals while executing remote calls so SIGCHLD or ART RT signals
+    // do not interrupt dlopen() while holding bionic's g_dl_mutex.
+    struct AsyncSigMaskGuard {
+        int pid;
+        uint64_t old_mask = 0;
+        bool active = false;
+        explicit AsyncSigMaskGuard(int p) : pid(p) {
+            if (ptrace(PTRACE_GETSIGMASK, pid, sizeof(old_mask), &old_mask) == 0) {
+                uint64_t new_mask = ~uint64_t{0};
+                constexpr int kSyncSigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE,
+                                             SIGTRAP, SIGABRT, SIGSYS};
+                for (int sig : kSyncSigs) {
+                    if (sig > 0 && sig <= 64) {
+                        new_mask &= ~(uint64_t{1} << (sig - 1));
+                    }
+                }
+                if (ptrace(PTRACE_SETSIGMASK, pid, sizeof(new_mask), &new_mask) == 0) {
+                    active = true;
+                }
+            }
+        }
+        ~AsyncSigMaskGuard() {
+            if (active) {
+                ptrace(PTRACE_SETSIGMASK, pid, sizeof(old_mask), &old_mask);
+            }
+        }
+    } sig_guard(pid);
 
     // Execute the shared remote injection logic
     bool success = execute_remote_injection(pid, regs, lib_path, mode);
 
+    // After remote_call() triggers a userspace SIGSEGV at libc_return_addr, the kernel
+    // clears in_syscall state. If the tracee was originally paused inside an interruptible
+    // syscall (e.g. ppoll/epoll_pwait), backup.REG_RET holds an internal -ERESTART* value
+    // (-512..-516). Restoring it directly leaks errno 512..516 to userspace (crashing
+    // ZygoteServer Os.poll). Rewrite those internal restart codes to -EINTR (-4).
+    long ret_val = static_cast<long>(backup.REG_RET);
+    if (ret_val == -512 || ret_val == -513 || ret_val == -514 || ret_val == -516) {
+        LOGV("rewriting kernel restart code %ld to -EINTR for PID %d", ret_val, pid);
+        backup.REG_RET = static_cast<std::remove_reference_t<decltype(backup.REG_RET)>>(-EINTR);
+#if defined(__x86_64__)
+        backup.orig_rax = -1;
+#elif defined(__i386__)
+        backup.orig_eax = -1;
+#elif defined(__arm__)
+        backup.uregs[17] = -1;
+#endif
+    }
+
     // Restore State directly, whether or not the injection worked: the target is running
-    // with the registers we hijacked, and resuming it with those would send it to our fake
+    // with the registers we modified, and resuming it with those would send it to our fake
     // return address.
     // The instruction pointer (REG_IP) is already correct in the backup.
     LOGI("restoring registers before resuming normal execution");
@@ -412,7 +497,8 @@ bool inject_after_start(int pid, const char *lib_path, TraceMode mode) {
 // Common wait routine to avoid repetition.
 // Returns false if wait failed or process died unexpectedly.
 static bool wait_for_process(int pid, int *status) {
-    if (waitpid(pid, status, __WALL) < 0) {
+    while (waitpid(pid, status, __WALL) < 0) {
+        if (errno == EINTR) continue;
         PLOGE("waitpid on PID %d", pid);
         return false;
     }
@@ -536,15 +622,16 @@ static bool detach_with_gki_workaround(int pid, int detach_signal) {
 
 // --- Strategy 1: PTRACE_SEIZE (Preferred) ---
 
-static bool trace_with_seize(int pid, TraceMode mode) {
+static bool trace_with_seize(int pid, TraceMode mode, int *seize_errno) {
     LOGI("attempting trace_seize on PID %d", pid);
+    if (seize_errno) *seize_errno = 0;
 
     bool process_started = mode == TraceMode::STANDALONE || mode == TraceMode::SYSTEM_SERVER;
 
     int options = process_started ? 0 : PTRACE_O_EXITKILL;
     // PTRACE_O_EXITKILL ensures target dies if we crash, preventing a zombie state.
     if (ptrace(PTRACE_SEIZE, pid, 0, options) == -1) {
-        // We do not return false here immediately; we let the caller handle errno.
+        if (seize_errno) *seize_errno = errno;
         return false;
     }
 
@@ -565,7 +652,9 @@ static bool trace_with_seize(int pid, TraceMode mode) {
     return false;
 
     // Wait for the initial Seize stop
-    if (!wait_for_process(pid, &status)) return false;
+    if (!wait_for_process(pid, &status)) {
+        BAIL_AND_DETACH
+    }
 
     // Determine the expected stop signal.
     // Spawn flow (already SIGSTOPped): SIGSTOP, with PTRACE_EVENT_STOP or plain event 0
@@ -612,14 +701,18 @@ static bool trace_with_seize(int pid, TraceMode mode) {
                 PLOGE("ptrace(PTRACE_CONT) failed");
                 BAIL_AND_DETACH
             }
-            if (!wait_for_process(pid, &status)) return false;
+            if (!wait_for_process(pid, &status)) {
+                BAIL_AND_DETACH
+            }
 
             // 4. Expect SIGTRAP (caused by the signal interruption in Seize mode)
             if (STOPPED_WITH(SIGTRAP, PTRACE_EVENT_STOP)) {
                 if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
                     BAIL_AND_DETACH
                 }
-                if (!wait_for_process(pid, &status)) return false;
+                if (!wait_for_process(pid, &status)) {
+                    BAIL_AND_DETACH
+                }
 
                 // 5. Expect the actual SIGCONT delivery
                 if (STOPPED_WITH(SIGCONT, 0)) {
@@ -709,7 +802,8 @@ bool trace_target(int pid, TraceMode mode) {
     LOGI("attaching to process [PID: %d, mode : %d]", pid, mode);
 
     // 1. Try SEIZE (Modern, robust handling of group stops)
-    if (trace_with_seize(pid, mode)) {
+    int seize_errno = 0;
+    if (trace_with_seize(pid, mode, &seize_errno)) {
         LOGI("successfully detached from %d (via SEIZE), NyaZygisk active", pid);
         return true;
     }
@@ -717,17 +811,18 @@ bool trace_target(int pid, TraceMode mode) {
     // 2. Check for fallback condition
     // PTRACE_SEIZE returns EIO if the process state prohibits seizing,
     // or sometimes if security modules interfere.
-    if (errno == EIO) {
+    if (seize_errno == EIO) {
         LOGW("PTRACE_SEIZE failed with EIO, attempting fallback to PTRACE_ATTACH");
 
         if (trace_with_attach(pid, mode)) {
             LOGI("successfully detached from %d (via ATTACH), NyaZygisk active", pid);
             return true;
         }
-    } else {
+    } else if (seize_errno != 0) {
         // If it wasn't EIO (e.g., EPERM, ESRCH), Attach will likely fail too,
         // or the error is fatal.
-        PLOGE("PTRACE_SEIZE failed (errno: %d)", errno);
+        errno = seize_errno;
+        PLOGE("PTRACE_SEIZE failed (errno: %d)", seize_errno);
     }
 
     return false;

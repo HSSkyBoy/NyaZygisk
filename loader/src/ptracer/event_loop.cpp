@@ -17,7 +17,7 @@ EventLoop::~EventLoop() {
 }
 
 bool EventLoop::Init() {
-    epoll_fd_ = epoll_create(1);
+    epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ == -1) {
         PLOGE("create epoll fd");
         return false;
