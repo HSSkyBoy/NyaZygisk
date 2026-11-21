@@ -40,8 +40,10 @@ allow system_server tmpfs file {getattr read write map execute}
 allow system_server magisk memfd_file {getattr read write map execute}
 allow system_server su memfd_file {getattr read write map execute}
 
-# Executable stub pages and JIT caches created inside system_server are backed by memfd so
-# system_server never needs process execmem (probed by DirtySepolicy). Their label follows
-# the creator: system_server_tmpfs on older kernels and system_server memfd_file on newer ones.
+# Executable stub pages and JIT caches created inside system_server. Some Zygisk modules
+# running in system_server (e.g. HMA-OSS via PanamaPort/AndroidVMTools) allocate hook
+# trampolines with anonymous mmap + mprotect(PROT_EXEC) instead of memfd, so keep execmem
+# alongside the memfd execute rules for compatibility.
+allow system_server system_server process execmem
 allow system_server system_server_tmpfs file {getattr read write map execute}
 allow system_server system_server memfd_file {getattr read write map execute}
