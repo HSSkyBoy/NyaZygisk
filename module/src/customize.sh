@@ -129,7 +129,10 @@ chcon u:object_r:system_file:s0 "$WORK_DIR"
 chown system:system "$WORK_DIR"
 
 if [ ! -f "$WORK_DIR/config.prop" ]; then
-  if [ -f "/data/adb/nyazygisk/config.prop" ]; then
+  if [ -f "/data/system/nyazygisk/config.prop" ] && [ "$WORK_DIR" != "/data/system/nyazygisk" ]; then
+    ui_print "- Migrating WebUI config from /data/system/nyazygisk"
+    cp -af "/data/system/nyazygisk/config.prop" "$WORK_DIR/config.prop"
+  elif [ -f "/data/adb/nyazygisk/config.prop" ]; then
     ui_print "- Migrating WebUI config from /data/adb/nyazygisk"
     cp -af "/data/adb/nyazygisk/config.prop" "$WORK_DIR/config.prop"
   elif [ -f "/data/adb/modules/zygisksu/config.prop" ]; then
@@ -145,7 +148,10 @@ if [ -f "$WORK_DIR/config.prop" ]; then
 fi
 
 if [ ! -f "$WORK_DIR/spoof.prop" ]; then
-  if [ -f "/data/adb/modules/zygisksu/spoof.prop" ]; then
+  if [ -f "/data/system/nyazygisk/spoof.prop" ] && [ "$WORK_DIR" != "/data/system/nyazygisk" ]; then
+    ui_print "- Migrating spoof.prop from /data/system/nyazygisk"
+    cp -af "/data/system/nyazygisk/spoof.prop" "$WORK_DIR/spoof.prop"
+  elif [ -f "/data/adb/modules/zygisksu/spoof.prop" ]; then
     ui_print "- Migrating spoof.prop from /data/adb/modules/zygisksu"
     cp -af "/data/adb/modules/zygisksu/spoof.prop" "$WORK_DIR/spoof.prop"
   elif [ -f "$MODPATH/spoof.prop" ]; then
@@ -159,7 +165,9 @@ if [ -f "$WORK_DIR/spoof.prop" ]; then
   chown root:root "$WORK_DIR/spoof.prop"
 fi
 
-# Clean up legacy /data/adb/nyazygisk directory if present
+# Clean up legacy /data/adb/nyazygisk directory if present.
+# Legacy /data/system/nyazygisk may still hold the live daemon socket during an in-place
+# upgrade; zygisk-init.sh removes it cleanly on the next cold boot.
 if [ -d "/data/adb/nyazygisk" ]; then
   rm -rf "/data/adb/nyazygisk"
 fi

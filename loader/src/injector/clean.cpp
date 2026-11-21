@@ -30,7 +30,13 @@
 #include "solist.hpp"
 #include "zygisk.hpp"
 
-constexpr const char *kConfigPath = "/data/system/nyazygisk/config.prop";
+#define _NYAZYGISK_STR(x) #x
+#define NYAZYGISK_STR(x) _NYAZYGISK_STR(x)
+#ifdef WORK_DIRECTORY
+constexpr const char *kConfigPath = NYAZYGISK_STR(WORK_DIRECTORY) "/config.prop";
+#else
+constexpr const char *kConfigPath = "/data/system_de/nyazygisk/config.prop";
+#endif
 
 void clean_libc_trace() {
     const auto status = Atexit::scrubFingerprint();

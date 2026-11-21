@@ -481,9 +481,17 @@ void setPltEngine(PltEngine e) {
     g_plt_engine_initialized.store(true, std::memory_order_release);
 }
 
+#define _ZN_HOOK_STR(x) #x
+#define ZN_HOOK_STR(x) _ZN_HOOK_STR(x)
+#ifdef WORK_DIRECTORY
+constexpr const char* kZnConfigPath = ZN_HOOK_STR(WORK_DIRECTORY) "/config.prop";
+#else
+constexpr const char* kZnConfigPath = "/data/system_de/nyazygisk/config.prop";
+#endif
+
 void initPltEngineFromConfig() {
     g_plt_engine_initialized.store(true, std::memory_order_release);
-    FILE* fp = fopen("/data/system/nyazygisk/config.prop", "re");
+    FILE* fp = fopen(kZnConfigPath, "re");
     if (!fp) return;
     char line[128];
     while (fgets(line, sizeof(line), fp)) {

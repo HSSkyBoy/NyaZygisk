@@ -1,6 +1,6 @@
-const PROP_PATH = "/data/system/nyazygisk/module.prop";
-const CONFIG_PATH = "/data/system/nyazygisk/config.prop";
-const CONFIG_DIR = "/data/system/nyazygisk";
+const PROP_PATH = "/data/system_de/nyazygisk/module.prop";
+const CONFIG_PATH = "/data/system_de/nyazygisk/config.prop";
+const CONFIG_DIR = "/data/system_de/nyazygisk";
 const PACKAGES_LIST_PATH = "/data/system/packages.list";
 const MODULE_MARKER = "@@NZMOD@@ ";
 const LANG_STORAGE_KEY = "nyazygisk.lang";
@@ -873,7 +873,9 @@ function setConfigValue(key, value) {
     `mkdir -p ${CONFIG_DIR} && ` +
     `{ if [ -f ${CONFIG_PATH} ]; then grep -v '^${key}=' ${CONFIG_PATH}; fi; ` +
     `printf '${key}=${value}\\n'; } > ${CONFIG_PATH}.tmp && ` +
-    `mv ${CONFIG_PATH}.tmp ${CONFIG_PATH} && chmod 0644 ${CONFIG_PATH}`,
+    `mv ${CONFIG_PATH}.tmp ${CONFIG_PATH} && chmod 0644 ${CONFIG_PATH} && ` +
+    `(chcon u:object_r:system_file:s0 ${CONFIG_PATH} 2>/dev/null || true) && ` +
+    `(chown system:system ${CONFIG_PATH} 2>/dev/null || true)`,
   );
 }
 

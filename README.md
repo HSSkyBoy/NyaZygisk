@@ -58,7 +58,7 @@ A detailed comparison (in Traditional Chinese) is available at [nkbe.top](https:
 * Active modules labelled by type (`[Zygisk]` / `[Next]`) with their target process bindings.
 * Per-app module exclusion list for user apps.
 * Device information, including the vendor ROM version.
-* Settings, stored in `/data/system/nyazygisk/config.prop`, that apply to app processes started afterwards (see [Experimental options](#experimental-options)).
+* Settings, stored in `/data/system_de/nyazygisk/config.prop`, that apply to app processes started afterwards (see [Experimental options](#experimental-options)).
 
 ### Experimental options
 
@@ -124,13 +124,13 @@ NyaZygisk uses two strategies to provide a clean mount namespace:
 
 ## Property Spoofing
 
-At boot, if `/data/system/nyazygisk/spoof.prop` exists, NyaZygisk applies its entries via `resetprop -n` (bootloader and verified-boot properties early during `zygisk-init.sh`, and debug/build properties later during `service.sh` so early-boot ADB debugging is preserved). User edits to `/data/system/nyazygisk/spoof.prop` are preserved across module updates. The default file covers:
+At boot, if `/data/system_de/nyazygisk/spoof.prop` exists, NyaZygisk applies its entries via `resetprop -n` (bootloader and verified-boot properties early during `zygisk-init.sh`, and debug/build properties later during `service.sh` so early-boot ADB debugging is preserved). User edits to `/data/system_de/nyazygisk/spoof.prop` are preserved across module updates. The default file covers:
 
 * bootloader and verified boot state (`ro.boot.verifiedbootstate`, `ro.boot.vbmeta.device_state`, `ro.boot.flash.locked`, ...);
 * build type and debuggable flags;
 * vendor-specific properties for MIUI, Realme, and OPlus.
 
-If not explicitly specified in `spoof.prop`, `ro.boot.vbmeta.digest` is generated randomly at boot. Edit `/data/system/nyazygisk/spoof.prop` to add, change, or remove entries (or remove the file to disable property spoofing); lines starting with `#` are ignored.
+If not explicitly specified in `spoof.prop`, `ro.boot.vbmeta.digest` is preserved when already a valid non-zero 64-hex digest, and generated randomly otherwise. Edit `/data/system_de/nyazygisk/spoof.prop` to add, change, or remove entries (or remove the file to disable property spoofing); lines starting with `#` are ignored.
 
 ## Building
 
