@@ -150,6 +150,7 @@ The module zips are written to `module/build/outputs/release/`.
 * [ZNNext](https://github.com/VeryBaaad/ZNNext): reference implementation of the standalone Zygisk Next API
 * [Dobby](https://github.com/LSPosed/Dobby): inline hooking engine
 * [rv64hook](https://github.com/eirv/riscv64-inline-hook): inline hooking engine for RISC-v 64
+* [YukiPLT](https://github.com/Rouyashiki/YukiPLT): default in-place PLT/GOT hooking library for ZN modules
 * [LSPlt](https://github.com/LSPosed/LSPlt): PLT hooking library for Android
 * [xz-embedded](https://github.com/tukaani-project/xz-embedded): `.gnu_debugdata` decompression
 

@@ -59,9 +59,11 @@ int main() {
     WriteConfig("anonymous_memory=1\n");
     Check("anonymous_memory=1 -> enabled", is_anonymous_memory_enabled());
 
-    printf("== plt_engine: bytehook default vs lsplt opt-in\n");
+    printf("== plt_engine: yukiplt default vs bytehook/lsplt opt-in\n");
     WriteConfig(nullptr);
-    Check("missing config.prop -> lsplt is off (bytehook default)", !is_lsplt_engine_configured());
+    Check("missing config.prop -> lsplt is off (yukiplt default)", !is_lsplt_engine_configured());
+    WriteConfig("plt_engine=yukiplt\n");
+    Check("plt_engine=yukiplt -> lsplt is off", !is_lsplt_engine_configured());
     WriteConfig("plt_engine=bytehook\n");
     Check("plt_engine=bytehook -> lsplt is off", !is_lsplt_engine_configured());
     WriteConfig("plt_engine=lsplt\n");

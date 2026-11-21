@@ -199,7 +199,7 @@ const I18N = {
 
 let currentLang = pickInitialLanguage();
 let currentTab = "overview";
-let currentPltEngine = "bytehook";
+let currentPltEngine = "yukiplt";
 let toastTimer = null;
 let refreshing = false;
 // Last successful status snapshot, kept so a language switch re-renders without a shell round trip.
@@ -787,7 +787,9 @@ async function refresh(showSuccessToast) {
       $("anonymous-memory").checked = config.anonymous_memory === "1";
       $("custom-linker").checked = config.custom_linker === "1";
       $("exclude-unmount").checked = config.exclude_unmount !== "0";
-      currentPltEngine = config.plt_engine === "lsplt" ? "lsplt" : "bytehook";
+      currentPltEngine = ["yukiplt", "bytehook", "lsplt"].includes(config.plt_engine)
+        ? config.plt_engine
+        : "yukiplt";
       updatePltEngineButtons();
       savedExcluded = new Set(
         (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),

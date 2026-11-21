@@ -23,6 +23,7 @@
 #include "module.hpp"
 #include "module_loader.hpp"
 #include "tracer_pid.hpp"
+#include "zn_hook.hpp"
 #include "zn_loader.hpp"
 #include "zygisk.hpp"
 
@@ -135,7 +136,18 @@ DCL_HOOK_FUNC(int, fork) {
         if (g_ctx->pid < 0) errno = g_ctx->fork_errno;
         return g_ctx->pid;
     }
-    return old_fork();
+    const bool yuki_fork = zn::hook::prepareFork();
+    const int pid = old_fork();
+    const int saved_errno = errno;
+    if (yuki_fork) {
+        if (pid == 0) {
+            zn::hook::afterForkChild();
+        } else {
+            zn::hook::afterForkParent();
+        }
+    }
+    errno = saved_errno;
+    return pid;
 }
 
 // Unmount stuffs in the process's private mount namespace

@@ -2,11 +2,18 @@
 
 namespace zn::hook {
 
-enum class PltEngine { kByteHook, kLsplt };
+enum class PltEngine { kYukiPlt, kByteHook, kLsplt };
 
 void setPltEngine(PltEngine e);
 void initPltEngineFromConfig();
 PltEngine getPltEngine();
+
+// Coordinates YukiPLT's process-owner guard across fork() when YukiPLT was
+// initialized in the parent (e.g. a ZN module hooked a symbol in Zygote).
+// Returns true if the caller must invoke afterForkParent/afterForkChild.
+bool prepareFork();
+void afterForkParent();
+void afterForkChild();
 
 // True if ByteHook was initialized or any inline/PLT hook chain is active
 // (so libzygisk.so and its dispatch stubs must stay mapped).

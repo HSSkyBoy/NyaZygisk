@@ -460,6 +460,14 @@ svg {
   gap: 16px;
 }
 
+.setting-row.stacked {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 0;
+}
+
 .toggle-row {
   cursor: pointer;
 }
@@ -558,6 +566,11 @@ svg {
 .segmented.wide {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.segmented.wide-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .segmented button {
