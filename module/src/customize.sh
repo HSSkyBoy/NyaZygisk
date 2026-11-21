@@ -124,7 +124,7 @@ WORK_DIR="@WORK_DIRECTORY@"
 
 # Migrate WebUI config and spoof.prop to work directory
 mkdir -p "$WORK_DIR"
-chmod 755 "$WORK_DIR"
+chmod 0550 "$WORK_DIR"
 chcon u:object_r:system_file:s0 "$WORK_DIR"
 chown system:system "$WORK_DIR"
 
@@ -139,7 +139,7 @@ if [ ! -f "$WORK_DIR/config.prop" ]; then
 fi
 
 if [ -f "$WORK_DIR/config.prop" ]; then
-  chmod 644 "$WORK_DIR/config.prop"
+  chmod 0644 "$WORK_DIR/config.prop"
   chcon u:object_r:system_file:s0 "$WORK_DIR/config.prop"
   chown system:system "$WORK_DIR/config.prop"
 fi
@@ -154,9 +154,9 @@ if [ ! -f "$WORK_DIR/spoof.prop" ]; then
 fi
 
 if [ -f "$WORK_DIR/spoof.prop" ]; then
-  chmod 644 "$WORK_DIR/spoof.prop"
+  chmod 0600 "$WORK_DIR/spoof.prop"
   chcon u:object_r:system_file:s0 "$WORK_DIR/spoof.prop"
-  chown 0:0 "$WORK_DIR/spoof.prop"
+  chown root:root "$WORK_DIR/spoof.prop"
 fi
 
 # Clean up legacy /data/adb/nyazygisk directory if present
@@ -203,6 +203,7 @@ set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 set_perm_recursive "$MODPATH/lib" 0 0 0755 0644 u:object_r:system_lib_file:s0
 set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
 set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
+set_perm "$MODPATH/spoof.prop" 0 0 0600
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)
