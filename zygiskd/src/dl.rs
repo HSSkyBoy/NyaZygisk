@@ -66,11 +66,12 @@ type AndroidCreateNamespaceFn = unsafe extern "C" fn(
 /// specified library into that namespace. This is crucial for isolating modules.
 pub fn dlopen(path: &str, flags: i32) -> Result<*mut c_void> {
     let filename = CString::new(path)?;
-    let filename_ptr = filename.as_ptr();
-
-    // The library path for the new namespace should be the directory of the library itself.
-    let mut path_bytes = filename.into_bytes_with_nul();
-    let dir_ptr = unsafe { libc::dirname(path_bytes.as_mut_ptr() as *mut c_char) };
+    let dir_str = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/");
+    let dir_cstr = CString::new(dir_str)?;
 
     let mut info = AndroidDlextinfo {
         flags: 0,
@@ -95,18 +96,13 @@ pub fn dlopen(path: &str, flags: i32) -> Result<*mut c_void> {
         // Create the namespace.
         let ns = unsafe {
             android_create_namespace(
-                filename_ptr,
-                dir_ptr,
+                filename.as_ptr(),
+                dir_cstr.as_ptr(),
                 std::ptr::null(), // default_library_path
                 ANDROID_NAMESPACE_TYPE_SHARED,
                 std::ptr::null(),     // permitted_when_isolated_path
                 std::ptr::null_mut(), // parent
-                dlopen
-                    as *const unsafe extern "C" fn(
-                        *const c_char,
-                        libc::c_int,
-                        *const AndroidDlextinfo,
-                    ) -> *mut c_void as *const c_void, // caller_addr
+                android_dlopen_ext as *const c_void, // caller_addr
             )
         };
 
@@ -122,9 +118,14 @@ pub fn dlopen(path: &str, flags: i32) -> Result<*mut c_void> {
     }
 
     // Load the library using the extended info.
-    let result = unsafe { android_dlopen_ext(filename_ptr, flags, &info) };
+    let result = unsafe { android_dlopen_ext(filename.as_ptr(), flags, &info) };
     if result.is_null() {
-        let error_msg = unsafe { CStr::from_ptr(libc::dlerror()).to_string_lossy() };
+        let err_ptr = unsafe { libc::dlerror() };
+        let error_msg = if err_ptr.is_null() {
+            "unknown dlopen error".into()
+        } else {
+            unsafe { CStr::from_ptr(err_ptr).to_string_lossy() }
+        };
         bail!("dlopen failed for {}: {}", path, error_msg);
     }
 

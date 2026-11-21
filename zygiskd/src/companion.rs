@@ -82,16 +82,23 @@ fn run_companion(fd: i32) -> Result<()> {
             name, client_fd
         );
 
-        // Let the client know we've received the request.
+        // Let the client know we've received the request; a disconnected client must not
+        // bring down the companion process for all other apps.
         let mut client_stream = unsafe { UnixStream::from_raw_fd(client_fd) };
-        client_stream
-            .write_u8(1)
-            .context("Failed to write ack to client")?;
+        if let Err(e) = client_stream.write_u8(1) {
+            log::warn!(
+                "Failed to write ack to companion client for `{}`: {}",
+                name, e
+            );
+            continue;
+        }
 
-        // Spawn a new thread to handle this client.
-        thread::spawn(move || {
+        // Spawn a new thread to handle this client without panicking on EAGAIN/OOM.
+        if let Err(e) = thread::Builder::new().spawn(move || {
             handle_client(client_stream, entry_fn);
-        });
+        }) {
+            error!("Failed to spawn companion handler thread for `{}`: {}", name, e);
+        }
     }
 
     Ok(())

@@ -93,7 +93,7 @@ fn run_zn_companion(lib_path: &str, fd: i32) -> Result<()> {
         }
 
         let on_connected = module.on_module_connected;
-        thread::spawn(move || {
+        if let Err(e) = thread::Builder::new().spawn(move || {
             if let Some(cb) = on_connected {
                 // onModuleConnected owns and must close this fd itself (per ZN API contract).
                 unsafe {
@@ -104,7 +104,13 @@ fn run_zn_companion(lib_path: &str, fd: i32) -> Result<()> {
                     libc::close(client_fd);
                 }
             }
-        });
+        }) {
+            error!(
+                "Failed to spawn ZN companion handler thread for `{}`: {}",
+                lib_path, e
+            );
+            unsafe { libc::close(client_fd) };
+        }
     }
 
     Ok(())
