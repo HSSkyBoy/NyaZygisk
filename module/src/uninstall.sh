@@ -3,4 +3,4 @@
 export TMP_PATH="@WORK_DIRECTORY@"
 
 [ -n "$TMP_PATH" ] && rm -rf -- "$TMP_PATH"
-rm -rf /data/adb/nyazygisk
+rm -rf /data/system/nyazygisk /data/adb/nyazygisk
