@@ -191,9 +191,10 @@ pub fn unix_listener_from_path(path: &str) -> Result<UnixListener> {
     let socket = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
     bind(&socket, &addr)?;
     listen(&socket, 128)?;
-    // Label the socket so the zygote domain may connect on enforcing-SELinux devices.
+    // Label the socket with the AOSP built-in zygote_socket type so zygote and
+    // system_server may connect on enforcing-SELinux devices without declaring a custom type.
     match Command::new("chcon")
-        .arg("u:object_r:zygisk_file:s0")
+        .arg("u:object_r:zygote_socket:s0")
         .arg(path)
         .status()
     {
@@ -206,8 +207,9 @@ pub fn unix_listener_from_path(path: &str) -> Result<UnixListener> {
         Ok(_) => {}
     }
     // Open by DAC, so a late-injected system_server can reach the socket as uid 1000.
-    // This is not the gate: access is controlled by the `zygisk_file` label above on an
-    // enforcing device, and by the per-action SO_PEERCRED checks in `handle_connection`.
+    // This is not the gate: access is controlled by the `0550 system:system` parent
+    // directory, the `zygote_socket` label above on an enforcing device, and the
+    // per-action SO_PEERCRED checks in `handle_connection`.
     let chmod_status = Command::new("chmod").arg("777").arg(path).status()?;
     if !chmod_status.success() {
         log::warn!("chmod 777 on {} exited with {}", path, chmod_status);
