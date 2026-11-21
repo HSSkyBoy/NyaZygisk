@@ -2,6 +2,7 @@
 #include <linux/eventpoll.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -341,7 +342,12 @@ bool AppMonitor::SocketHandler::Init() {
         .sun_family = AF_UNIX,
         .sun_path = {0},
     };
-    sprintf(addr.sun_path, "%s/%s", zygiskd::GetTmpPath().c_str(), AppMonitor::SOCKET_NAME);
+    int path_len = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s",
+                            zygiskd::GetTmpPath().c_str(), AppMonitor::SOCKET_NAME);
+    if (path_len < 0 || static_cast<size_t>(path_len) >= sizeof(addr.sun_path)) {
+        LOGE("control socket path too long");
+        return false;
+    }
     socklen_t socklen = sizeof(sa_family_t) + strlen(addr.sun_path);
     // A filesystem socket outlives the process that bound it, and the work directory
     // outlives a root session, so the name can still be held by a monitor that is gone.
@@ -354,30 +360,36 @@ bool AppMonitor::SocketHandler::Init() {
         PLOGE("bind socket");
         return false;
     }
+    if (chmod(addr.sun_path, 0600) == -1) {
+        PLOGE("chmod control socket %s", addr.sun_path);
+    }
     return true;
 }
 
 void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, uint32_t) {
+    constexpr int kMaxPayloadLen = 65536;
     for (;;) {
         buf_.resize(sizeof(MsgHead));
         MsgHead &msg_header = *reinterpret_cast<MsgHead *>(buf_.data());
         ssize_t nread = recv(sock_fd_, &msg_header, sizeof(MsgHead), MSG_PEEK | MSG_TRUNC);
         if (nread == -1) {
-            if (errno == EAGAIN) break;
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             PLOGE("SocketHandler: recv(peek)");
-            continue;
+            break;
         }
-        ssize_t real_size;
+        size_t real_size = 0;
         // Only these two carry a payload; every other command is the bare enum value.
         if (msg_header.cmd == Command::DAEMON_SET_INFO ||
             msg_header.cmd == Command::DAEMON_SET_ERROR_INFO) {
-            if (static_cast<size_t>(nread) < sizeof(MsgHead)) {
-                LOGE("SocketHandler: received incomplete header for cmd %d, size %zd",
-                     msg_header.cmd, nread);
+            if (static_cast<size_t>(nread) < sizeof(MsgHead) ||
+                msg_header.length < 0 || msg_header.length > kMaxPayloadLen) {
+                LOGE("SocketHandler: invalid header for cmd %d, size %zd, length %d",
+                     msg_header.cmd, nread, msg_header.length);
                 recv(sock_fd_, buf_.data(), buf_.size(), 0);
                 continue;
             }
-            real_size = sizeof(MsgHead) + msg_header.length;
+            real_size = sizeof(MsgHead) + static_cast<size_t>(msg_header.length);
         } else {
             if (static_cast<size_t>(nread) != sizeof(Command)) {
                 LOGE("SocketHandler: received invalid size for cmd %d, size %zd", msg_header.cmd,
@@ -391,11 +403,13 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
         MsgHead &full_msg = *reinterpret_cast<MsgHead *>(buf_.data());
         nread = recv(sock_fd_, &full_msg, real_size, 0);
         if (nread == -1) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             PLOGE("recv(read)");
-            continue;
+            break;
         }
-        if (nread != real_size) {
-            LOGE("SocketHandler: expected %zd bytes, but received %zd", real_size, nread);
+        if (static_cast<size_t>(nread) != real_size) {
+            LOGE("SocketHandler: expected %zu bytes, but received %zd", real_size, nread);
             continue;
         }
 
@@ -431,7 +445,8 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
             break;
         }
         case SYSTEM_SERVER_STARTED:
-            LOGV("system server started, module.prop updated");
+            monitor_.get_abi_manager().notify_system_server_started();
+            LOGV("system server started, crash-loop counter cleared");
             break;
         }
     }
@@ -516,9 +531,10 @@ void AppMonitor::SigChldHandler::HandleEvent(EventLoop &, uint32_t) {
         struct signalfd_siginfo fdsi;
         ssize_t s = read(signal_fd_, &fdsi, sizeof(fdsi));
         if (s == -1) {
-            if (errno == EAGAIN) break;
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             PLOGE("read signalfd");
-            continue;
+            break;
         }
         if (s != sizeof(fdsi) || fdsi.ssi_signo != SIGCHLD) {
             continue;
@@ -560,7 +576,7 @@ void AppMonitor::SigChldHandler::handleChildEvent(int pid, int &status) {
     if (process_.count(pid)) {
         handleTracedProcess(pid, status);
     } else {
-        handleNewProcess(pid);
+        handleNewProcess(pid, status);
     }
 }
 
@@ -632,7 +648,12 @@ void AppMonitor::SigChldHandler::handleParentEvent(int pid, int &status) {
 /**
  * @brief Registers and prepares a newly discovered process for execve tracking.
  */
-void AppMonitor::SigChldHandler::handleNewProcess(int pid) {
+void AppMonitor::SigChldHandler::handleNewProcess(int pid, int status) {
+    if (WIFEXITED(status) || WIFSIGNALED(status)) {
+        LOGV("ignoring already-exited unknown process %d (%s)", pid, parse_status(status).c_str());
+        return;
+    }
+
     LOGV("new process %d discovered and attached", pid);
     process_.emplace(pid);
 
@@ -641,8 +662,15 @@ void AppMonitor::SigChldHandler::handleNewProcess(int pid) {
         PLOGE("set PTRACE_O_TRACEEXEC on new process %d", pid);
     }
 
-    // Always resume the process.
-    ptrace(PTRACE_CONT, pid, 0, 0);
+    // Forward any non-stop signal that arrived right after fork.
+    int resume_sig = 0;
+    if (WIFSTOPPED(status) && WPTEVENT(status) == 0) {
+        int sig = WSTOPSIG(status);
+        if (sig != SIGSTOP && sig != SIGTRAP) {
+            resume_sig = sig;
+        }
+    }
+    ptrace(PTRACE_CONT, pid, 0, resume_sig);
 }
 
 /**
@@ -668,6 +696,14 @@ void AppMonitor::SigChldHandler::handleTracedProcess(int pid, int &status) {
         }
 
         ptrace(PTRACE_CONT, pid, 0, 0);
+        keep_attached = true;
+    }
+    // A regular signal arrived before execve() completed: forward it and keep waiting for execve().
+    else if (WIFSTOPPED(status) && WPTEVENT(status) == 0) {
+        int sig = WSTOPSIG(status);
+        int forward_sig = (sig == SIGSTOP || sig == SIGTRAP) ? 0 : sig;
+        LOGV("forwarding pre-exec signal %s (%d) to traced process %d", sigabbrev_np(sig), sig, pid);
+        ptrace(PTRACE_CONT, pid, 0, forward_sig);
         keep_attached = true;
     }
     // Unexpected state during the pre-exec phase.
@@ -733,7 +769,8 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
             clean_prog.resize(clean_prog.size() - 10);
         }
 
-        bool is_zygote = (clean_prog == monitor_.get_abi_manager().program_path_);
+        bool is_zygote =
+            (clean_prog == monitor_.get_abi_manager().program_path_) && is_zygote_cmdline(pid);
 #if defined(__LP64__)
         bool is_hyos_spawner = (clean_prog == "/system_ext/bin/hyos_spawner" ||
                                 clean_prog.ends_with("/hyos_spawner"));
@@ -769,7 +806,7 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
         // Force the process into a standard SIGSTOP state.
         kill(pid, SIGSTOP);
         ptrace(PTRACE_CONT, pid, 0, 0);
-        waitpid(pid, &status, __WALL);
+        while (waitpid(pid, &status, __WALL) == -1 && errno == EINTR) {}
 
         if (stopped_with(status, SIGSTOP, 0)) {
             LOGV("target %d halted, detaching monitor to allow injector seize", pid);

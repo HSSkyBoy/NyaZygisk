@@ -88,7 +88,7 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
 
 int fork_dont_care();
 
-void wait_for_trace(int pid, int *status, int flags);
+bool wait_for_trace(int pid, int *status, int flags);
 
 std::string parse_status(int status);
 
@@ -148,6 +148,9 @@ pid_t get_ppid(pid_t pid);
 /// its own argv[0] -- the name `pidof` matches and the one comm never carries.
 /// \return The arguments, or an empty vector if the file could not be read.
 std::vector<std::string> read_cmdline(pid_t pid);
+
+/// \brief Tests whether \p pid's /proc/<pid>/cmdline identifies an Android Zygote process.
+bool is_zygote_cmdline(pid_t pid);
 
 /// \brief Finds every live process whose /proc/<pid>/exe resolves to \p exe.
 ///

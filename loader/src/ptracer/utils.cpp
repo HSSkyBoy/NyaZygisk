@@ -397,7 +397,7 @@ void *find_func_addr(const std::vector<MapInfo> &local_info,
 // --- Remote Call Implementation ---
 
 // Most ABIs require the stack to be 16-byte aligned.
-constexpr uintptr_t STACK_ALIGN_MASK = ~0xf;
+constexpr uintptr_t STACK_ALIGN_MASK = ~uintptr_t{0xf};
 
 void align_stack(struct user_regs_struct &regs, long preserve) {
     regs.REG_SP = (regs.REG_SP - preserve) & STACK_ALIGN_MASK;
@@ -447,7 +447,7 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
          args.size(), return_addr);
 
 #if defined(__x86_64__)
-    // ABI: rdi, rsi, rdx, rcx, r8, r9, then stack
+    // ABI: rdi, rsi, rdx, rcx, r8, r9, then stack (16-byte aligned before `call` pushes ret addr)
     if (args.size() > 0) regs.rdi = args[0];
     if (args.size() > 1) regs.rsi = args[1];
     if (args.size() > 2) regs.rdx = args[2];
@@ -456,7 +456,8 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     if (args.size() > 5) regs.r9 = args[5];
     if (args.size() > 6) {
         size_t stack_args_size = (args.size() - 6) * sizeof(long);
-        regs.REG_SP -= stack_args_size;
+        size_t padded_size = (stack_args_size + 15) & ~size_t{15};
+        regs.REG_SP -= padded_size;
         if (write_proc(pid, regs.REG_SP, args.data() + 6, stack_args_size) !=
             (ssize_t) stack_args_size) {
             LOGE("failed to push stack arguments for x86_64 call");
@@ -472,11 +473,11 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     regs.REG_IP = func_addr;
 
 #elif defined(__i386__)
-    // ABI: All arguments on stack, pushed in reverse order.
-    // Our vector is already in the correct order to write in one block.
+    // ABI: All arguments on stack, 16-byte aligned before `call` pushes ret addr.
     if (!args.empty()) {
         size_t stack_args_size = args.size() * sizeof(long);
-        regs.REG_SP -= stack_args_size;
+        size_t padded_size = (stack_args_size + 15) & ~size_t{15};
+        regs.REG_SP -= padded_size;
         if (write_proc(pid, regs.REG_SP, args.data(), stack_args_size) !=
             (ssize_t) stack_args_size) {
             LOGE("failed to push arguments for i386 call");
@@ -492,13 +493,14 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     regs.REG_IP = func_addr;
 
 #elif defined(__aarch64__)
-    // ABI: x0-x7, then stack
+    // ABI: x0-x7, then 16-byte aligned stack
     for (size_t i = 0; i < args.size() && i < 8; i++) {
         regs.regs[i] = args[i];
     }
     if (args.size() > 8) {
         size_t stack_args_size = (args.size() - 8) * sizeof(long);
-        regs.REG_SP -= stack_args_size;
+        size_t padded_size = (stack_args_size + 15) & ~size_t{15};
+        regs.REG_SP -= padded_size;
         if (write_proc(pid, regs.REG_SP, args.data() + 8, stack_args_size) !=
             (ssize_t) stack_args_size) {
             LOGE("failed to push stack arguments for aarch64 call");
@@ -509,7 +511,7 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     regs.REG_IP = func_addr;
 
 #elif defined(__riscv) && __riscv_xlen == 64
-    // ABI: a0-a7, then stack
+    // ABI: a0-a7, then 16-byte aligned stack
     unsigned long *arg_regs[] = {&regs.a0, &regs.a1, &regs.a2, &regs.a3,
                                  &regs.a4, &regs.a5, &regs.a6, &regs.a7};
     for (size_t i = 0; i < args.size() && i < 8; i++) {
@@ -517,7 +519,8 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     }
     if (args.size() > 8) {
         size_t stack_args_size = (args.size() - 8) * sizeof(long);
-        regs.REG_SP -= stack_args_size;
+        size_t padded_size = (stack_args_size + 15) & ~size_t{15};
+        regs.REG_SP -= padded_size;
         if (write_proc(pid, regs.REG_SP, args.data() + 8, stack_args_size) !=
             (ssize_t) stack_args_size) {
             LOGE("failed to push stack arguments for riscv64 call");
@@ -528,13 +531,14 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     regs.REG_IP = func_addr;
 
 #elif defined(__arm__)
-    // ABI: r0-r3, then stack
+    // ABI: r0-r3, then 16-byte aligned stack
     for (size_t i = 0; i < args.size() && i < 4; i++) {
         regs.uregs[i] = args[i];
     }
     if (args.size() > 4) {
         size_t stack_args_size = (args.size() - 4) * sizeof(long);
-        regs.REG_SP -= stack_args_size;
+        size_t padded_size = (stack_args_size + 15) & ~size_t{15};
+        regs.REG_SP -= padded_size;
         if (write_proc(pid, (uintptr_t) regs.REG_SP, args.data() + 4, stack_args_size) !=
             (ssize_t) stack_args_size) {
             LOGE("failed to push stack arguments for arm call");
@@ -565,9 +569,14 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
         return 0;
     }
 
-    ptrace(PTRACE_CONT, pid, 0, 0);
-    int status;
-    wait_for_trace(pid, &status, __WALL);  // wait_for_trace handles intermediate stops
+    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
+        PLOGE("remote_call: ptrace(PTRACE_CONT) failed");
+        return 0;
+    }
+    int status = 0;
+    if (!wait_for_trace(pid, &status, __WALL)) {
+        return 0;
+    }
 
     if (!get_regs(pid, regs)) {
         LOGE("remote_call: failed to get registers after call");
@@ -575,7 +584,13 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     }
 
     // We expect the tracee to stop at our fake return address.
-    if (WIFSTOPPED(status) && static_cast<uintptr_t>(regs.REG_IP) == return_addr) {
+#if defined(__arm__)
+    bool at_return = (static_cast<uintptr_t>(regs.REG_IP) & ~uintptr_t{1}) ==
+                     (return_addr & ~uintptr_t{1});
+#else
+    bool at_return = static_cast<uintptr_t>(regs.REG_IP) == return_addr;
+#endif
+    if (WIFSTOPPED(status) && at_return) {
         LOGV("remote call returned, result: 0x%" PRIXPTR, (uintptr_t) regs.REG_RET);
         if (ok) *ok = true;
         return regs.REG_RET;
@@ -610,61 +625,35 @@ int fork_dont_care() {
 
     if (pid > 0) {
         // --- Original Parent Process ---
-        // The parent waits for the *first* child to exit. This first child exits
-        // almost immediately, allowing the parent to continue its work while the
-        // second child (the daemon) continues in the background. It then returns
-        // the PID of the child it forked, signaling to the caller that it is the parent.
-        int status;
-        waitpid(pid, &status, __WALL);
+        int status = 0;
+        while (waitpid(pid, &status, __WALL) == -1 && errno == EINTR) {}
         return pid;
     }
 
     // --- First Child Process ---
-    // This process exists only to spawn the final daemon process.
+    // Use _exit() so parent stdio buffers and C++ destructors are never duplicated/flushed.
     pid_t grandchild_pid = fork();
     if (grandchild_pid < 0) {
         PLOGE("fork grandchild");
-        exit(1);  // Exit with an error code if the second fork fails.
+        _exit(1);
     }
 
     if (grandchild_pid > 0) {
-        // The first child has successfully forked the grandchild, so its job is
-        // done. It exits immediately. This orphans the grandchild, which is
-        // then adopted by the 'init' process (PID 1). This is the key to detachment.
-        exit(0);
+        _exit(0);
     }
 
     // --- Second Child (Grandchild / Daemon) Process ---
-    // The second fork() call returned 0 to this process. Now, we return 0 from
-    // this function to let the new daemon's internal logic know that it is the
-    // child process and should begin its work.
     return 0;
 }
 
 /**
  * @brief Skips the currently trapped syscall for a tracee.
- *
- * When a tracee is stopped due to a PTRACE_EVENT_SECCOMP, it is paused *before*
- * the syscall is executed. This function prevents the syscall from ever running
- * by modifying the tracee's registers.
- *
- * It sets the syscall number register to -1, which is an invalid syscall number.
- * The kernel recognizes this and skips the execution, causing the syscall to
- * immediately return with -ENOSYS, without any side effects.
- *
- * For ARM/ARM64, it also uses architecture-specific ptrace requests as a
- * fallback/alternative method to ensure the syscall is skipped. These might not
-alway
-s
- * work on all kernel versions, so their errors are ignored.
- *
- * @param pid The process ID of the tracee.
  */
-void tracee_skip_syscall(int pid) {
-    user_regs_struct regs;
+static bool tracee_skip_syscall(int pid) {
+    user_regs_struct regs{};
     if (!get_regs(pid, regs)) {
         LOGE("tracee_skip_syscall: failed to get registers");
-        exit(1);
+        return false;
     }
 
     // Set the syscall number to an invalid value (-1).
@@ -673,7 +662,7 @@ void tracee_skip_syscall(int pid) {
 
     if (!set_regs(pid, regs)) {
         LOGE("tracee_skip_syscall: failed to set registers to skip syscall");
-        exit(1);
+        return false;
     }
 
     // For ARM architectures, there are specific ptrace requests to modify the
@@ -687,45 +676,47 @@ void tracee_skip_syscall(int pid) {
 #elif defined(__arm__)
     ptrace(PTRACE_SET_SYSCALL, pid, 0, (void *) -1);
 #endif
+    return true;
 }
 
 /**
  * @brief Waits for a ptrace event, handling seccomp events specifically.
  *
- * This is a wrapper around waitpid that handles EINTR and automatically
- * continues the process after a PTRACE_EVENT_SECCOMP.
- *
- * @param pid The PID to wait for.
- * @param status A pointer to an integer where the status will be stored.
- * @param flags Flags for waitpid.
+ * Returns false instead of calling exit(1) so callers can restore tracee state,
+ * detach cleanly, and avoid leaving Zygote frozen in SIGSTOP on error.
  */
-void wait_for_trace(int pid, int *status, int flags) {
+bool wait_for_trace(int pid, int *status, int flags) {
     while (true) {
         if (waitpid(pid, status, flags) == -1) {
             if (errno == EINTR) {
                 continue;  // Interrupted by a signal, just retry.
             }
             PLOGE("waitpid(%d)", pid);
-            exit(1);
+            return false;
         }
 
         // Check if the stop was caused by a PTRACE_EVENT_SECCOMP.
         // The event itself is the point: raising it overwrote ptrace_message with zero.
         if (*status >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
             LOGV("seccomp event on pid %d cleared its ptrace event message", pid);
-            tracee_skip_syscall(pid);
-            ptrace(PTRACE_CONT, pid, 0, 0);
+            if (!tracee_skip_syscall(pid)) {
+                return false;
+            }
+            if (ptrace(PTRACE_CONT, pid, 0, 0) == -1) {
+                PLOGE("ptrace(PTRACE_CONT) after seccomp event on pid %d", pid);
+                return false;
+            }
             continue;  // Continue waiting for the next *real* stop event.
         }
 
         // If the process terminated or signaled instead of stopping, it's an error.
         if (!WIFSTOPPED(*status)) {
             LOGE("process %d did not stop as expected: %s", pid, parse_status(*status).c_str());
-            exit(1);
+            return false;
         }
 
         // It's a valid stop event that we need to handle, so we return.
-        return;
+        return true;
     }
 }
 
@@ -868,6 +859,22 @@ std::vector<std::string> read_cmdline(pid_t pid) {
     }
     if (!arg.empty()) argv.push_back(arg);
     return argv;
+}
+
+bool is_zygote_cmdline(pid_t pid) {
+    auto argv = read_cmdline(pid);
+    if (argv.empty()) return false;
+
+    std::string_view name = argv.front();
+    if (auto slash = name.rfind('/'); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    if (name.starts_with("zygote")) return true;
+
+    for (const auto &arg : argv) {
+        if (arg == "--zygote") return true;
+    }
+    return false;
 }
 
 /**
