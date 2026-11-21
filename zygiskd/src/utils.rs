@@ -85,13 +85,17 @@ pub fn get_property(name: &str) -> Result<String> {
     let mut buf = vec![0u8; 92]; // PROP_VALUE_MAX
     let len = unsafe { __system_property_get(name.as_ptr(), buf.as_mut_ptr() as *mut c_char) };
     if len > 0 {
-        Ok(String::from_utf8_lossy(&buf[..len as usize]).to_string())
+        let len = (len as usize).min(buf.len() - 1);
+        Ok(String::from_utf8_lossy(&buf[..len]).to_string())
     } else {
         Ok(String::new())
     }
 }
 
 // --- Unix Socket and IPC Extensions ---
+
+/// Maximum string length accepted over the daemon IPC socket (64 KiB).
+const MAX_IPC_STRING_LEN: usize = 64 * 1024;
 
 /// An extension trait for `UnixStream` to simplify reading and writing common data types.
 pub trait UnixStreamExt {
@@ -126,6 +130,9 @@ impl UnixStreamExt for UnixStream {
 
     fn read_string(&mut self) -> Result<String> {
         let len = self.read_usize()?;
+        if len > MAX_IPC_STRING_LEN {
+            anyhow::bail!("IPC string length {} exceeds limit {}", len, MAX_IPC_STRING_LEN);
+        }
         let mut buf = vec![0u8; len];
         self.read_exact(&mut buf)?;
         Ok(String::from_utf8(buf)?)
@@ -153,11 +160,8 @@ impl UnixStreamExt for UnixStream {
     }
 }
 
-/// Returns the real uid of the process on the other end of a connected Unix domain
-/// socket, as reported by the kernel (`SO_PEERCRED`), or `None` if it could not be
-/// determined. Unlike any uid a client sends as part of its request payload, this
-/// cannot be spoofed by the client.
-pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
+/// Returns the kernel-verified peer credentials (`SO_PEERCRED`) of a connected Unix socket.
+pub fn peer_cred(stream: &UnixStream) -> Option<libc::ucred> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let ret = unsafe {
@@ -169,7 +173,15 @@ pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
             &mut len,
         )
     };
-    (ret == 0).then_some(cred.uid)
+    (ret == 0).then_some(cred)
+}
+
+/// Returns the real uid of the process on the other end of a connected Unix domain
+/// socket, as reported by the kernel (`SO_PEERCRED`), or `None` if it could not be
+/// determined. Unlike any uid a client sends as part of its request payload, this
+/// cannot be spoofed by the client.
+pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    peer_cred(stream).map(|cred| cred.uid)
 }
 
 /// Creates a `UnixListener` bound to a given path, handling file cleanup and SELinux contexts.
@@ -178,27 +190,40 @@ pub fn unix_listener_from_path(path: &str) -> Result<UnixListener> {
     let addr = SocketAddrUnix::new(path)?;
     let socket = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
     bind(&socket, &addr)?;
-    listen(&socket, 10)?; // Backlog of 10
+    listen(&socket, 128)?;
     // Label the socket so the zygote domain may connect on enforcing-SELinux devices.
-    Command::new("chcon")
+    match Command::new("chcon")
         .arg("u:object_r:zygisk_file:s0")
         .arg(path)
-        .status()?;
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            log::warn!("chcon on {} exited with {}", path, status);
+        }
+        Err(e) => {
+            log::warn!("failed to run chcon on {}: {}", path, e);
+        }
+        Ok(_) => {}
+    }
     // Open by DAC, so a late-injected system_server can reach the socket as uid 1000.
     // This is not the gate: access is controlled by the `zygisk_file` label above on an
     // enforcing device, and by the per-action SO_PEERCRED checks in `handle_connection`.
-    Command::new("chmod").arg("777").arg(path).status()?;
+    let chmod_status = Command::new("chmod").arg("777").arg(path).status()?;
+    if !chmod_status.success() {
+        log::warn!("chmod 777 on {} exited with {}", path, chmod_status);
+    }
     Ok(UnixListener::from(socket))
 }
 
 /// Sends a datagram packet to a Unix socket path.
 pub fn unix_datagram_sendto(path: &str, buf: &[u8]) -> Result<()> {
-    set_socket_create_context(&get_current_attr()?)?;
+    let _ = set_socket_create_context(&get_current_attr().unwrap_or_default());
     let addr = SocketAddrUnix::new(path.as_bytes())?;
     let socket = socket(AddressFamily::UNIX, SocketType::DGRAM, None)?;
     connect(&socket, &addr)?;
-    sendto(socket, buf, SendFlags::empty(), &addr)?;
-    set_socket_create_context("u:r:zygote:s0")?;
+    let res = sendto(socket, buf, SendFlags::empty(), &addr);
+    let _ = set_socket_create_context("");
+    res?;
     Ok(())
 }
 
@@ -210,17 +235,22 @@ pub fn is_socket_alive(stream: &UnixStream) -> bool {
         revents: 0,
     };
     let mut pfds = [pfd];
-    // A timeout of 0 makes poll return immediately.
-    let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 1, 0) };
-    if ret < 0 {
-        return false;
+    loop {
+        // A timeout of 0 makes poll return immediately.
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 1, 0) };
+        if ret < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return false;
+        }
+        // If `revents` has any flag other than POLLIN (e.g., POLLHUP, POLLERR), the socket is dead.
+        return pfds[0].revents & !libc::POLLIN == 0;
     }
-    // If `revents` has any flag other than POLLIN (e.g., POLLHUP, POLLERR), the socket is dead.
-    pfds[0].revents & !libc::POLLIN == 0
 }
 
 // --- FFI for Android System APIs ---
 unsafe extern "C" {
-    fn __system_property_get(name: *const c_char, value: *mut c_char) -> u32;
+    fn __system_property_get(name: *const c_char, value: *mut c_char) -> libc::c_int;
     // Other __system_property functions could be declared here if needed.
 }

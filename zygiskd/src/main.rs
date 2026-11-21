@@ -130,18 +130,28 @@ fn start() {
             root_impl::setup();
             println!("Detected root implementation: {:?}", root_impl::get());
         }
-        _ => {
-            // Default mode: the main daemon. It accepts an optional `--workdir <path>`
-            // option carrying the work directory; absent that, it falls back to the
-            // TMP_PATH environment variable (see `initialize_globals`).
-            let workdir = args
-                .iter()
-                .position(|arg| arg == "--workdir")
-                .and_then(|i| args.get(i + 1))
-                .map(String::as_str);
-            if let Err(e) = main_daemon_entry(workdir) {
+        None => {
+            if let Err(e) = main_daemon_entry(None) {
                 error!("Zygiskd daemon failed: {:?}", e);
             }
+        }
+        Some("--workdir") => {
+            match args.get(2).map(String::as_str) {
+                Some(workdir) if args.len() == 3 => {
+                    if let Err(e) = main_daemon_entry(Some(workdir)) {
+                        error!("Zygiskd daemon failed: {:?}", e);
+                    }
+                }
+                _ => {
+                    error!("Usage: zygiskd [--workdir <path> | companion <fd> | zn-companion <lib> <fd> | version | root]");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(unknown) => {
+            error!("Unknown argument '{}'", unknown);
+            eprintln!("error: unknown argument '{}'", unknown);
+            std::process::exit(1);
         }
     }
 }
@@ -149,6 +159,10 @@ fn start() {
 /// The main entry point for the Zygisk daemon.
 /// It sets up the environment and launches the core daemon logic.
 fn main_daemon_entry(tmp_path: Option<&str>) -> anyhow::Result<()> {
+    let self_exe = std::env::current_exe()
+        .ok()
+        .or_else(|| std::env::args().next().map(std::path::PathBuf::from))
+        .context("Failed to determine daemon executable path")?;
     // Do not hold the module directory as the working directory. It is inherited from the
     // monitor, and it does not survive a reinstall: ksud's boot-time update path deletes
     // the live directory before renaming the staged one in, while a hot install renames it
@@ -165,7 +179,7 @@ fn main_daemon_entry(tmp_path: Option<&str>) -> anyhow::Result<()> {
     // NyaZygisk owns mount cleanup for app processes. Keep the root solution from
     // performing the same work independently before our namespace policy runs.
     root_impl::take_over_umount();
-    zygiskd::main(tmp_path)
+    zygiskd::main(tmp_path, self_exe)
 }
 
 fn main() {
