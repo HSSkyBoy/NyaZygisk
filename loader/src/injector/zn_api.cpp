@@ -52,7 +52,7 @@ int api_inlineHook(void* target, void* addr, void** original) {
 
 int api_inlineUnhook(void* target) {
     if (!target) return ZN_FAILED;
-    return zn::hook::inlineUnhook(target) ? ZN_SUCCESS : ZN_FAILED;
+    return zn::hook::inlineUnhook(target, __builtin_return_address(0)) ? ZN_SUCCESS : ZN_FAILED;
 }
 
 ZnSymbolResolver* api_newSymbolResolver(const char* path, void* base) {
@@ -115,11 +115,10 @@ int api_connectCompanion(void* handle) {
     return zygiskd::ConnectZnCompanion(h->lib_path);
 }
 
-// Helper: Raw inline hook via Dobby
+// Route HYOS fallback inline hooks through the chain manager so ZN modules
+// hooking the same symbol can coexist.
 bool inlineHookRaw(void* target, void* addr, void** original) {
-    if (!target || !addr) return false;
-    return DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(addr),
-                     reinterpret_cast<dobby_dummy_func_t*>(original)) == RT_SUCCESS;
+    return zn::hook::inlineHook(target, addr, original);
 }
 
 // ZN API v4 Runtime: the HyperOS Rust Runtime (HYOS)
