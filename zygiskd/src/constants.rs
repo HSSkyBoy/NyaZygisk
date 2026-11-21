@@ -68,8 +68,12 @@ pub enum DaemonSocketAction {
     GetZnPlan,
     ReportZnModule,
     /// Rebuild the module snapshot from disk and acknowledge with 1 (ok) or 0 (kept the
-    /// previous snapshot). Must stay last to match `SocketAction` in `daemon.hpp`.
+    /// previous snapshot).
     RefreshModules,
+    /// Register a `SOCK_DGRAM` broker socketpair end created in `hyos_spawner` so
+    /// specialized app children can request ZN companion streams via `SCM_RIGHTS`
+    /// without connecting to `cp64.sock`. Must stay last to match `SocketAction` in `daemon.hpp`.
+    RegisterZnCompanionBroker,
 }
 
 bitflags! {
