@@ -44,7 +44,7 @@ public:
         jint env_res = vm_->GetEnv(reinterpret_cast<void**>(&env_), JNI_VERSION_1_6);
         if (env_res == JNI_EDETACHED) {
             LOGI("current thread is detached from JVM, attaching temporarily...");
-            JavaVMAttachArgs args{JNI_VERSION_1_6, "NyaZygisk-Injector", nullptr};
+            JavaVMAttachArgs args{JNI_VERSION_1_6, nullptr, nullptr};
             if (vm_->AttachCurrentThread(&env_, &args) == JNI_OK) {
                 attached_ = true;
             } else {
