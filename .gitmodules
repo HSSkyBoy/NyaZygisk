@@ -11,3 +11,6 @@
 	path = loader/src/external/bhook
 	url = https://github.com/Nk-Be/bhook.git
 	branch = standalone
+[submodule "loader/src/external/yukiplt"]
+	path = loader/src/external/yukiplt
+	url = https://github.com/Rouyashiki/YukiPLT.git

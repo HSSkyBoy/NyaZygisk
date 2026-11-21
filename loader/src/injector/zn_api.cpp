@@ -230,11 +230,28 @@ int hyosSetnameHook(pthread_t thread, const char* name) {
     return ret;
 }
 
+bool g_hyos_yuki_fork_armed = false;
+
 void hyosInstallHooks();
 
 void hyosAtForkPrepare() {
     if (g_hyos_module_count > 0 && (!g_orig_setcontext || !g_orig_setname)) {
         hyosInstallHooks();
+    }
+    g_hyos_yuki_fork_armed = zn::hook::prepareFork();
+}
+
+void hyosAtForkParent() {
+    if (g_hyos_yuki_fork_armed) {
+        g_hyos_yuki_fork_armed = false;
+        zn::hook::afterForkParent();
+    }
+}
+
+void hyosAtForkChild() {
+    if (g_hyos_yuki_fork_armed) {
+        g_hyos_yuki_fork_armed = false;
+        zn::hook::afterForkChild();
     }
 }
 
@@ -321,7 +338,7 @@ int api_hyos_registerModule(const void* module) {
     if (!hyosInChild()) {
         if (!g_hyos_atfork_registered) {
             g_hyos_atfork_registered = true;
-            pthread_atfork(hyosAtForkPrepare, nullptr, nullptr);
+            pthread_atfork(hyosAtForkPrepare, hyosAtForkParent, hyosAtForkChild);
         }
         hyosInstallHooks();
     }

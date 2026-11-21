@@ -25,6 +25,7 @@
 #include "misc.hpp"
 #include "zygisk.hpp"
 #include "zn_api.hpp"
+#include "zn_hook.hpp"
 
 // Structure for the getdents64 syscall
 struct linux_dirent64 {
@@ -356,9 +357,19 @@ void ZygiskContext::fork_pre() {
     // First block SIGCHLD, unblock after original fork is done
     sigmask(SIG_BLOCK, SIGCHLD);
     fork_attempted = true;
+    const bool yuki_fork = zn::hook::prepareFork();
     pid = old_fork();
+    const int saved_errno = errno;
+    if (yuki_fork) {
+        if (pid == 0) {
+            zn::hook::afterForkChild();
+        } else {
+            zn::hook::afterForkParent();
+        }
+    }
     if (pid < 0) {
-        fork_errno = errno;
+        fork_errno = saved_errno;
+        errno = saved_errno;
         return;
     }
     child_process = (pid == 0);
