@@ -1,4 +1,4 @@
-﻿# NyaZygisk
+# NyaZygisk
 
 NyaZygisk is an open-source Zygote injection framework implemented via [`ptrace`](https://man7.org/linux/man-pages/man2/ptrace.2.html) for APatch, KernelSU, and Magisk.
 It loads both **Magisk Zygisk API** modules and **Zygisk Next (ZN) API** modules from a single implementation, and can replace Magisk's built-in Zygisk.
@@ -124,13 +124,13 @@ NyaZygisk uses two strategies to provide a clean mount namespace:
 
 ## Property Spoofing
 
-At startup, NyaZygisk reads `/data/adb/modules/zygisksu/spoof.prop` and overrides the listed system properties in hooked property reads. The default file covers:
+At boot, if `/data/system/nyazygisk/spoof.prop` exists, NyaZygisk applies its entries via `resetprop -n` (bootloader and verified-boot properties early during `zygisk-init.sh`, and debug/build properties later during `service.sh` so early-boot ADB debugging is preserved). User edits to `/data/system/nyazygisk/spoof.prop` are preserved across module updates. The default file covers:
 
 * bootloader and verified boot state (`ro.boot.verifiedbootstate`, `ro.boot.vbmeta.device_state`, `ro.boot.flash.locked`, ...);
 * build type and debuggable flags;
 * vendor-specific properties for MIUI, Realme, and OPlus.
 
-`ro.boot.vbmeta.digest` is generated randomly each time the properties are loaded. Edit `spoof.prop` to add, change, or remove entries; lines starting with `#` are ignored.
+If not explicitly specified in `spoof.prop`, `ro.boot.vbmeta.digest` is generated randomly at boot. Edit `/data/system/nyazygisk/spoof.prop` to add, change, or remove entries (or remove the file to disable property spoofing); lines starting with `#` are ignored.
 
 ## Building
 

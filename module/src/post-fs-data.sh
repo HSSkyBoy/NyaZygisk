@@ -15,27 +15,21 @@ if [ "$ZYGISK_ENABLED" ]; then
   exit 0
 fi
 
-cd "$MODDIR"
+cd "$MODDIR" || exit 1
 
-if [ "$(which magisk)" ]; then
+. "$MODDIR/zygisk-init.sh" </dev/null >/dev/null 2>&1
+
+if command -v magisk >/dev/null 2>&1; then
+  SELF_NAME=${MODDIR##*/}
   for file in ../*; do
-    if [ -d "$file" ] && [ -d "$file/zygisk" ] && ! [ -f "$file/disable" ]; then
+    [ "${file##*/}" = "$SELF_NAME" ] && continue
+    if [ -d "$file" ] && [ -d "$file/zygisk" ] && ! [ -f "$file/disable" ] && ! [ -f "$file/remove" ]; then
       if [ -f "$file/post-fs-data.sh" ]; then
-        cd "$file"
         log -p i -t "zygisk-sh" "Manually trigger post-fs-data.sh for $file"
-        # INFO: Don't propagate errexit
-        set +e
-
-        sh "$(realpath ./post-fs-data.sh)"
-
-        # INFO: Re-enable errexit
-        set -e
-
-        cd "$MODDIR"
+        (
+          cd "$file" && sh "$(realpath ./post-fs-data.sh)"
+        )
       fi
     fi
   done
 fi
-
-. "$MODDIR/zygisk-init.sh"
-

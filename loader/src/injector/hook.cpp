@@ -5,14 +5,12 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
-#include <sys/system_properties.h>
 #include <unistd.h>
 #include <unwind.h>
 #include <fcntl.h>
 #include <atomic>
 #include <cstdarg>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <lsplt.hpp>
@@ -106,57 +104,6 @@ constexpr const char *kZygote = "com/android/internal/os/Zygote";
 ZygiskContext *g_ctx;
 HookContext *g_hook;
 
-static std::unordered_map<std::string, std::string> g_spoof_props;
-
-static void LoadPropConfig() {
-    int fd = open("/data/adb/modules/zygisksu/spoof.prop", O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        char buf[4096];
-        std::string content;
-        ssize_t nread;
-        while ((nread = read(fd, buf, sizeof(buf))) > 0) {
-            content.append(buf, nread);
-        }
-        close(fd);
-
-        size_t pos = 0;
-        while (pos < content.size()) {
-            size_t eol = content.find('\n', pos);
-            if (eol == std::string::npos) eol = content.size();
-
-            // Trim leading whitespace
-            const char *start = content.data() + pos;
-            const char *end = content.data() + eol;
-            while (start < end && (*start == ' ' || *start == '\t' || *start == '\r')) start++;
-            while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) end--;
-
-            std::string_view line(start, end - start);
-            if (!line.empty() && line[0] != '#') {
-                if (auto eq = line.find('='); eq != std::string_view::npos) {
-                    g_spoof_props[std::string(line.substr(0, eq))] = std::string(line.substr(eq + 1));
-                }
-            }
-            pos = eol + 1;
-        }
-    }
-
-    int urandom_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (urandom_fd >= 0) {
-        uint8_t rand_buf[32];
-        if (read(urandom_fd, rand_buf, sizeof(rand_buf)) == sizeof(rand_buf)) {
-            char hex_str[65];
-            const char *hex_digits = "0123456789abcdef";
-            for (int i = 0; i < 32; ++i) {
-                hex_str[i * 2] = hex_digits[rand_buf[i] >> 4];
-                hex_str[i * 2 + 1] = hex_digits[rand_buf[i] & 0x0f];
-            }
-            hex_str[64] = '\0';
-            g_spoof_props["ro.boot.vbmeta.digest"] = hex_str;
-        }
-        close(urandom_fd);
-    }
-}
-
 // -----------------------------------------------------------------
 
 #define DCL_HOOK_FUNC(ret, func, ...)                                                              \
@@ -183,6 +130,7 @@ DCL_HOOK_FUNC(int, fork) { return (g_ctx && g_ctx->pid >= 0) ? g_ctx->pid : old_
 
 // Unmount stuffs in the process's private mount namespace
 DCL_HOOK_FUNC(static int, unshare, int flags) {
+    int saved_errno = errno;
     if (g_ctx && (flags & CLONE_NEWNS) && !(g_ctx->flags & SERVER_FORK_AND_SPECIALIZE)) {
         bool should_unmount = !(g_ctx->info_flags & (PROCESS_IS_MANAGER | PROCESS_GRANTED_ROOT)) &&
                               (g_ctx->flags & DO_REVERT_UNMOUNT);
@@ -198,22 +146,11 @@ DCL_HOOK_FUNC(static int, unshare, int flags) {
         }
     }
 
-    int res = old_unshare(flags);
-    errno = 0;  // Restore errno back to 0
-    return res;
+    errno = saved_errno;
+    return old_unshare(flags);
 }
 
 DCL_HOOK_FUNC(int, property_get, const char *key, char *value, const char *default_value) {
-    if (key && !g_spoof_props.empty()) {
-        auto it = g_spoof_props.find(key);
-        if (it != g_spoof_props.end()) {
-            if (value) {
-                strlcpy(value, it->second.c_str(), PROP_VALUE_MAX);
-            }
-            return it->second.length();
-        }
-    }
-
     static std::atomic<bool> unloader_triggered{false};
     
     bool expected = false;
@@ -647,7 +584,6 @@ void HookContext::restore_zygote_hook(JNIEnv *env) {
 // -----------------------------------------------------------------
 
 void hook_entry(void *start_addr, size_t block_size) {
-    LoadPropConfig();
     g_hook = new HookContext(start_addr, block_size);
     g_hook->hook_plt();
 

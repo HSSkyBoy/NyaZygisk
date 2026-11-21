@@ -40,9 +40,23 @@ install_lib() {
 # from the previous root session may still own the control socket here, and removing it
 # would leave that monitor unreachable while injected processes keep running. A stale
 # socket from a dead monitor is unlinked by the next monitor when it binds.
+FIRST_INIT=false
+[ ! -d "$TMP_PATH" ] && FIRST_INIT=true
+
 create_sys_perm "$TMP_PATH"
+if [ "$FIRST_INIT" = true ] && [ ! -f "$TMP_PATH/spoof.prop" ] && [ -f "$MODDIR/spoof.prop" ]; then
+  cp -af "$MODDIR/spoof.prop" "$TMP_PATH/spoof.prop"
+  chmod 644 "$TMP_PATH/spoof.prop"
+  chcon u:object_r:system_file:s0 "$TMP_PATH/spoof.prop"
+  chown 0:0 "$TMP_PATH/spoof.prop"
+fi
+
 install_lib "$MODDIR/lib64/libzygisk.so" "$TMP_PATH/lib64/libzygisk.so"
 install_lib "$MODDIR/lib/libzygisk.so" "$TMP_PATH/lib/libzygisk.so"
+
+if [ -f "$MODDIR/spoof-props.sh" ]; then
+  sh "$MODDIR/spoof-props.sh" early
+fi
 
 [ "$DEBUG" = true ] && export RUST_BACKTRACE=1
 
@@ -57,4 +71,4 @@ fi
 
 # Unconditional: the monitor enforces the single-owner invariant itself and a redundant
 # one exits immediately, so neither this script nor a soft reboot has to probe for it.
-"$TRACER" monitor &
+"$TRACER" monitor </dev/null >/dev/null 2>&1 &

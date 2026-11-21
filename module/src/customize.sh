@@ -104,23 +104,10 @@ if [ "$KSU" ]; then
   fi
 fi
 
-# Stop any running old monitor/tracer to prevent it from overwriting new module.prop during update
-if [ "$BOOTMODE" ]; then
-  for tracer_bin in \
-    /data/adb/modules/zygisksu/bin/zygisk-ptrace64 \
-    /data/adb/modules/zygisksu/bin/zygisk-ptrace32 \
-    "$MODPATH/bin/zygisk-ptrace64" \
-    "$MODPATH/bin/zygisk-ptrace32"; do
-    if [ -f "$tracer_bin" ]; then
-      "$tracer_bin" ctl exit >/dev/null 2>&1
-    fi
-  done
-  killall -9 zygisk-ptrace64 zygisk-ptrace32 >/dev/null 2>&1
-fi
-
 ui_print "- Extracting module files"
 extract "$ZIPFILE" 'module.prop'               "$MODPATH"
 extract "$ZIPFILE" 'spoof.prop'                "$MODPATH"
+extract "$ZIPFILE" 'spoof-props.sh'            "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh'           "$MODPATH"
 extract "$ZIPFILE" 'late-load.sh'              "$MODPATH"
 extract "$ZIPFILE" 'post-mount.sh'             "$MODPATH"
@@ -133,26 +120,43 @@ ui_print "- Extracting WebUI files"
 unzip -o "$ZIPFILE" "webroot/*" -x "*.sha256" -d "$MODPATH" >&2
 mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
-# Migrate WebUI config to /data/system/nyazygisk
-mkdir -p "/data/system/nyazygisk"
-chmod 755 "/data/system/nyazygisk"
-chcon u:object_r:system_file:s0 "/data/system/nyazygisk"
-chown system:system "/data/system/nyazygisk"
+WORK_DIR="@WORK_DIRECTORY@"
 
-if [ ! -f "/data/system/nyazygisk/config.prop" ]; then
+# Migrate WebUI config and spoof.prop to work directory
+mkdir -p "$WORK_DIR"
+chmod 755 "$WORK_DIR"
+chcon u:object_r:system_file:s0 "$WORK_DIR"
+chown system:system "$WORK_DIR"
+
+if [ ! -f "$WORK_DIR/config.prop" ]; then
   if [ -f "/data/adb/nyazygisk/config.prop" ]; then
     ui_print "- Migrating WebUI config from /data/adb/nyazygisk"
-    cp -af "/data/adb/nyazygisk/config.prop" "/data/system/nyazygisk/config.prop"
+    cp -af "/data/adb/nyazygisk/config.prop" "$WORK_DIR/config.prop"
   elif [ -f "/data/adb/modules/zygisksu/config.prop" ]; then
     ui_print "- Migrating WebUI config from /data/adb/modules/zygisksu"
-    cp -af "/data/adb/modules/zygisksu/config.prop" "/data/system/nyazygisk/config.prop"
+    cp -af "/data/adb/modules/zygisksu/config.prop" "$WORK_DIR/config.prop"
   fi
 fi
 
-if [ -f "/data/system/nyazygisk/config.prop" ]; then
-  chmod 644 "/data/system/nyazygisk/config.prop"
-  chcon u:object_r:system_file:s0 "/data/system/nyazygisk/config.prop"
-  chown system:system "/data/system/nyazygisk/config.prop"
+if [ -f "$WORK_DIR/config.prop" ]; then
+  chmod 644 "$WORK_DIR/config.prop"
+  chcon u:object_r:system_file:s0 "$WORK_DIR/config.prop"
+  chown system:system "$WORK_DIR/config.prop"
+fi
+
+if [ ! -f "$WORK_DIR/spoof.prop" ]; then
+  if [ -f "/data/adb/modules/zygisksu/spoof.prop" ]; then
+    ui_print "- Migrating spoof.prop from /data/adb/modules/zygisksu"
+    cp -af "/data/adb/modules/zygisksu/spoof.prop" "$WORK_DIR/spoof.prop"
+  elif [ -f "$MODPATH/spoof.prop" ]; then
+    cp -af "$MODPATH/spoof.prop" "$WORK_DIR/spoof.prop"
+  fi
+fi
+
+if [ -f "$WORK_DIR/spoof.prop" ]; then
+  chmod 644 "$WORK_DIR/spoof.prop"
+  chcon u:object_r:system_file:s0 "$WORK_DIR/spoof.prop"
+  chown 0:0 "$WORK_DIR/spoof.prop"
 fi
 
 # Clean up legacy /data/adb/nyazygisk directory if present
@@ -202,7 +206,7 @@ set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)
-if [ "$HUAWEI_MAPLE_ENABLED" == "1" ]; then
+if [ "$HUAWEI_MAPLE_ENABLED" = "1" ]; then
   ui_print "- Add ro.maple.enable=0"
   echo "ro.maple.enable=0" >>"$MODPATH/system.prop"
 fi
