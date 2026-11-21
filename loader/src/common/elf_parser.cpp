@@ -27,11 +27,11 @@ ElfImage::ElfImage(std::string_view library_name) {
     }
 
     struct stat file_stat;
-    if (fstat(fd, &file_stat) < 0) {
+    if (fstat(fd, &file_stat) < 0 || file_stat.st_size < static_cast<off_t>(sizeof(ElfW(Ehdr)))) {
         close(fd);
         return;
     }
-    map_size_ = file_stat.st_size;
+    map_size_ = static_cast<size_t>(file_stat.st_size);
 
     map_base_ = mmap(nullptr, map_size_, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
@@ -42,60 +42,85 @@ ElfImage::ElfImage(std::string_view library_name) {
     }
 
     header_ = static_cast<ElfW(Ehdr)*>(map_base_);
+    if (memcmp(header_->e_ident, ELFMAG, SELFMAG) != 0) {
+        return;
+    }
 
-    const ElfW(Phdr)* const program_headers = pointer_at<ElfW(Phdr)>(map_base_, header_->e_phoff);
-    for (int i = 0; i < header_->e_phnum; ++i) {
-        const ElfW(Phdr)* phdr = &program_headers[i];
-        if (phdr->p_type == PT_LOAD) {
-            // Calculate the "bias" or "load bias". This is the difference between
-            // the virtual address where the segment is loaded in memory and its
-            // offset in the file. All file offsets must be adjusted by this bias
-            // to get their corresponding address in memory.
-            // We only need to calculate this once from the first LOAD segment.
-            bias_ = phdr->p_vaddr - phdr->p_offset;
-            break;
+    if (header_->e_phoff <= map_size_ &&
+        static_cast<size_t>(header_->e_phnum) <= (map_size_ - header_->e_phoff) / sizeof(ElfW(Phdr))) {
+        const ElfW(Phdr)* const program_headers = pointer_at<ElfW(Phdr)>(map_base_, header_->e_phoff);
+        for (int i = 0; i < header_->e_phnum; ++i) {
+            const ElfW(Phdr)* phdr = &program_headers[i];
+            if (phdr->p_type == PT_LOAD) {
+                // Calculate the "bias" or "load bias". This is the difference between
+                // the virtual address where the segment is loaded in memory and its
+                // offset in the file. All file offsets must be adjusted by this bias
+                // to get their corresponding address in memory.
+                // We only need to calculate this once from the first LOAD segment.
+                bias_ = phdr->p_vaddr - phdr->p_offset;
+                break;
+            }
         }
+    }
+
+    if (header_->e_shoff > map_size_ || header_->e_shnum == 0 ||
+        static_cast<size_t>(header_->e_shnum) > (map_size_ - header_->e_shoff) / sizeof(ElfW(Shdr)) ||
+        header_->e_shstrndx == SHN_UNDEF || header_->e_shstrndx >= header_->e_shnum) {
+        return;
     }
 
     const ElfW(Shdr)* const section_headers = pointer_at<ElfW(Shdr)>(map_base_, header_->e_shoff);
     const ElfW(Shdr)* const shstrtab_header = &section_headers[header_->e_shstrndx];
+    if (shstrtab_header->sh_offset > map_size_ ||
+        shstrtab_header->sh_size > map_size_ - shstrtab_header->sh_offset) {
+        return;
+    }
     const char* const shstrtab = pointer_at<char>(map_base_, shstrtab_header->sh_offset);
 
     // Iterate through section headers to find the ones we need for symbol lookup.
     for (int i = 0; i < header_->e_shnum; ++i) {
         const ElfW(Shdr)* shdr = &section_headers[i];
+        if (shdr->sh_offset > map_size_ || shdr->sh_size > map_size_ - shdr->sh_offset) continue;
         switch (shdr->sh_type) {
         case SHT_DYNSYM:
             dynsym_ = pointer_at<ElfW(Sym)>(map_base_, shdr->sh_offset);
             break;
         case SHT_SYMTAB:
-            symtab_ = pointer_at<ElfW(Sym)>(map_base_, shdr->sh_offset);
-            symtab_count_ = shdr->sh_size / shdr->sh_entsize;
+            if (shdr->sh_entsize >= sizeof(ElfW(Sym))) {
+                symtab_ = pointer_at<ElfW(Sym)>(map_base_, shdr->sh_offset);
+                symtab_count_ = shdr->sh_size / shdr->sh_entsize;
+            }
             break;
         case SHT_STRTAB:
-            // There can be multiple string tables. Differentiate them by name.
-            if (strcmp(&shstrtab[shdr->sh_name], ".strtab") == 0) {
-                strtab_ = pointer_at<char>(map_base_, shdr->sh_offset);
-            } else if (strcmp(&shstrtab[shdr->sh_name], ".dynstr") == 0) {
-                dynstr_ = pointer_at<char>(map_base_, shdr->sh_offset);
+            if (shdr->sh_name < shstrtab_header->sh_size) {
+                // There can be multiple string tables. Differentiate them by name.
+                if (strcmp(&shstrtab[shdr->sh_name], ".strtab") == 0) {
+                    strtab_ = pointer_at<char>(map_base_, shdr->sh_offset);
+                } else if (strcmp(&shstrtab[shdr->sh_name], ".dynstr") == 0) {
+                    dynstr_ = pointer_at<char>(map_base_, shdr->sh_offset);
+                }
             }
             break;
         case SHT_HASH: {
-            const uint32_t* hash_data = pointer_at<uint32_t>(map_base_, shdr->sh_offset);
-            nbucket_ = hash_data[0];
-            bucket_ = const_cast<uint32_t*>(&hash_data[2]);
-            chain_ = const_cast<uint32_t*>(&bucket_[nbucket_]);
+            if (shdr->sh_size >= 8) {
+                const uint32_t* hash_data = pointer_at<uint32_t>(map_base_, shdr->sh_offset);
+                nbucket_ = hash_data[0];
+                bucket_ = const_cast<uint32_t*>(&hash_data[2]);
+                chain_ = const_cast<uint32_t*>(&bucket_[nbucket_]);
+            }
             break;
         }
         case SHT_GNU_HASH: {
-            const uint32_t* gnu_hash_data = pointer_at<uint32_t>(map_base_, shdr->sh_offset);
-            gnu_nbucket_ = gnu_hash_data[0];
-            gnu_symindx_ = gnu_hash_data[1];
-            gnu_bloom_size_ = gnu_hash_data[2];
-            gnu_shift2_ = gnu_hash_data[3];
-            gnu_bloom_filter_ = pointer_at<ElfW(Addr)>(map_base_, shdr->sh_offset + 16);
-            gnu_bucket_ = reinterpret_cast<uint32_t*>(&gnu_bloom_filter_[gnu_bloom_size_]);
-            gnu_chain_ = &gnu_bucket_[gnu_nbucket_];
+            if (shdr->sh_size >= 16) {
+                const uint32_t* gnu_hash_data = pointer_at<uint32_t>(map_base_, shdr->sh_offset);
+                gnu_nbucket_ = gnu_hash_data[0];
+                gnu_symindx_ = gnu_hash_data[1];
+                gnu_bloom_size_ = gnu_hash_data[2];
+                gnu_shift2_ = gnu_hash_data[3];
+                gnu_bloom_filter_ = pointer_at<ElfW(Addr)>(map_base_, shdr->sh_offset + 16);
+                gnu_bucket_ = reinterpret_cast<uint32_t*>(&gnu_bloom_filter_[gnu_bloom_size_]);
+                gnu_chain_ = &gnu_bucket_[gnu_nbucket_];
+            }
             break;
         }
         }
@@ -182,8 +207,12 @@ ElfW(Addr) ElfImage::findSymbolOffset(std::string_view symbol_name, uint32_t gnu
  *    - For each symbol in the chain, compare its full name with the target name.
  *    - The end of a chain is marked by the least significant bit (LSB) of the chain entry being 1.
  */
+
 ElfW(Addr) ElfImage::findSymbolByGnuHash(std::string_view symbol_name, uint32_t gnu_hash) const {
-    if (gnu_bloom_filter_ == nullptr) return 0;
+    if (gnu_bloom_filter_ == nullptr || gnu_bloom_size_ == 0 || gnu_nbucket_ == 0 ||
+        dynsym_ == nullptr || dynstr_ == nullptr) {
+        return 0;
+    }
 
     constexpr auto bloom_mask_bits = sizeof(ElfW(Addr)) * 8;
     const ElfW(Addr) bloom_word = gnu_bloom_filter_[(gnu_hash / bloom_mask_bits) % gnu_bloom_size_];
@@ -207,7 +236,7 @@ ElfW(Addr) ElfImage::findSymbolByGnuHash(std::string_view symbol_name, uint32_t 
         // The top 31 bits of the chain entry are a hash validation.
         if (((*chain ^ gnu_hash) >> 1) == 0) {
             const ElfW(Sym)* sym = &dynsym_[sym_index];
-            if (symbol_name == &dynstr_[sym->st_name]) {
+            if (sym->st_shndx != SHN_UNDEF && symbol_name == &dynstr_[sym->st_name]) {
                 return sym->st_value;  // Found the symbol
             }
         }
@@ -218,12 +247,15 @@ ElfW(Addr) ElfImage::findSymbolByGnuHash(std::string_view symbol_name, uint32_t 
 }
 
 ElfW(Addr) ElfImage::findSymbolBySysvHash(std::string_view symbol_name, uint32_t sysv_hash) const {
-    if (bucket_ == nullptr) return 0;
+    if (bucket_ == nullptr || nbucket_ == 0 || chain_ == nullptr ||
+        dynsym_ == nullptr || dynstr_ == nullptr) {
+        return 0;
+    }
 
     // Use the hash to find the start of the chain in the bucket array.
     for (uint32_t n = bucket_[sysv_hash % nbucket_]; n != 0; n = chain_[n]) {
         const ElfW(Sym)* sym = &dynsym_[n];
-        if (symbol_name == &dynstr_[sym->st_name]) {
+        if (sym->st_shndx != SHN_UNDEF && symbol_name == &dynstr_[sym->st_name]) {
             return sym->st_value;  // Found the symbol
         }
     }
@@ -235,6 +267,7 @@ void ElfImage::buildSymbolCache() {
         symbol_cache_.reserve(symtab_count_);
         for (ElfW(Off) i = 0; i < symtab_count_; ++i) {
             const ElfW(Sym)* sym = &symtab_[i];
+            if (sym->st_shndx == SHN_UNDEF) continue;
             const unsigned char type = ELF_ST_TYPE(sym->st_info);
             // Cache only function and object symbols that have a size.
             if ((type == STT_FUNC || type == STT_OBJECT) && sym->st_size > 0) {
@@ -276,7 +309,8 @@ bool ElfImage::findLoadedLibraryInfo(std::string_view library_name) {
     dl_iterate_phdr(
         [](struct dl_phdr_info* phdr_info, size_t, void* data) -> int {
             auto* lib_info = static_cast<LibraryInfo*>(data);
-            if (phdr_info->dlpi_name && strstr(phdr_info->dlpi_name, lib_info->name.data())) {
+            if (phdr_info->dlpi_name &&
+                std::string_view(phdr_info->dlpi_name).find(lib_info->name) != std::string_view::npos) {
                 *lib_info->path_out = phdr_info->dlpi_name;
                 *lib_info->base_addr_out = reinterpret_cast<void*>(phdr_info->dlpi_addr);
                 lib_info->found = true;

@@ -111,6 +111,7 @@ struct CfiShadowRange {
     uintptr_t start = 0;
     uintptr_t end = 0;
     int prot = 0;
+    std::vector<std::pair<uintptr_t, uintptr_t>> readable_spans;
 };
 
 static inline uintptr_t cfi_shadow_offset(uintptr_t addr) {
@@ -125,18 +126,27 @@ static bool find_cfi_shadow(CfiShadowRange *out) {
     while (fgets(line, sizeof(line), fp) != nullptr) {
         if (strstr(line, "[anon:cfi shadow]") == nullptr) continue;
         unsigned long start = 0, end = 0;
-        if (sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
+        char perms[5] = {};
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) < 2) continue;
         if (run.end != 0 && run.end == start) {
             run.end = end;
         } else {
             run.start = start;
             run.end = end;
+            run.readable_spans.clear();
+        }
+        if (perms[0] == 'r') {
+            if (!run.readable_spans.empty() && run.readable_spans.back().second == start) {
+                run.readable_spans.back().second = end;
+            } else {
+                run.readable_spans.emplace_back(start, end);
+            }
         }
         if (run.end - run.start > best.end - best.start) best = run;
     }
     fclose(fp);
     if (best.end == 0) return false;
-    *out = best;
+    *out = std::move(best);
     out->prot = PROT_READ;
     return true;
 }
@@ -195,8 +205,15 @@ SavedCfiShadow backup_cfi_shadow(uintptr_t base, size_t size) {
 
     size_t byte_len = src_end - src;
     saved.dst_addr = src;
-    saved.shadow_data.resize(byte_len);
-    memcpy(saved.shadow_data.data(), reinterpret_cast<const void *>(src), byte_len);
+    saved.shadow_data.assign(byte_len, 0);
+    for (const auto &[r_start, r_end] : shadow.readable_spans) {
+        uintptr_t copy_start = std::max(src, r_start);
+        uintptr_t copy_end = std::min(src_end, r_end);
+        if (copy_start < copy_end) {
+            memcpy(saved.shadow_data.data() + (copy_start - src),
+                   reinterpret_cast<const void *>(copy_start), copy_end - copy_start);
+        }
+    }
     LOGV("cfi-shadow: backed up %zu bytes for [%p, %p]", byte_len,
          reinterpret_cast<void *>(base), reinterpret_cast<void *>(base + size));
     return saved;
@@ -581,10 +598,25 @@ void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor)
     const Fossil::MountInfoEntry &clean_entry = *clean_template_opt;
     LOGV("using preceding entry as the clean spoof template: '%s'", clean_entry.target.c_str());
 
-    Fossil::MountArgv clean_fossil_to_write(clean_entry, suspicious_fossil.getStartAddress(),
+    Fossil::MountInfoEntry bounded_entry = clean_entry;
+    const size_t available_slot = suspicious_fossil.getFossilSize() + suspicious_fossil.getRemnantSize();
+    const size_t max_until_end = static_cast<size_t>(search_to - suspicious_fossil.getStartAddress());
+    const size_t max_capacity = std::min(available_slot, max_until_end);
+
+    Fossil::MountArgv clean_fossil_to_write(bounded_entry, suspicious_fossil.getStartAddress(),
                                             suspicious_fossil.getBaseFlags());
-    clean_fossil_to_write.dump("spoofed fossil");
+    if (clean_fossil_to_write.getFossilSize() > max_capacity) {
+        bounded_entry.mount_options = "rw,seclabel,relatime";
+        clean_fossil_to_write = Fossil::MountArgv(bounded_entry, suspicious_fossil.getStartAddress(),
+                                                  suspicious_fossil.getBaseFlags());
+    }
 
     suspicious_fossil.cleanMemory();
-    clean_fossil_to_write.writeToMemory();
+    if (clean_fossil_to_write.getFossilSize() <= max_capacity) {
+        clean_fossil_to_write.dump("spoofed fossil");
+        clean_fossil_to_write.writeToMemory();
+    } else {
+        LOGW("spoofed fossil (%zu bytes) exceeds stack slot (%zu bytes), zeroed suspicious fossil only",
+             clean_fossil_to_write.getFossilSize(), max_capacity);
+    }
 }

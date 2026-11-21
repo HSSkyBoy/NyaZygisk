@@ -65,28 +65,38 @@ static void SetSocketTimeout(int fd, int timeout_ms) {
 }
 
 int Connect(uint8_t retry) {
-    int fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un addr{
         .sun_family = AF_UNIX,
         .sun_path = {0},
     };
     auto socket_path = GetTmpPath() + kCPSocketName;
-    strcpy(addr.sun_path, socket_path.c_str());
+    if (socket_path.size() >= sizeof(addr.sun_path)) {
+        LOGE("socket path too long: %s", socket_path.c_str());
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
     socklen_t socklen = sizeof(addr);
 
     while (retry--) {
+        int fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            return -1;
+        }
         int r = connect(fd, reinterpret_cast<struct sockaddr *>(&addr), socklen);
         if (r == 0) {
             SetSocketTimeout(fd, kDaemonIoTimeoutMs);
             return fd;
         }
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
         if (retry) {
             LOGW("retrying to connect to zygiskd, sleep 1s");
             sleep(1);
         }
     }
 
-    close(fd);
     return -1;
 }
 
@@ -166,6 +176,7 @@ void CacheMountNamespace(pid_t pid) {
     UniqueFd fd = Connect(1);
     if (fd == -1) {
         PLOGE("CacheMountNamespace");
+        return;
     }
     socket_utils::write_u8(fd, (uint8_t) SocketAction::CacheMountNamespace);
     socket_utils::write_u32(fd, (uint32_t) pid);
@@ -207,10 +218,15 @@ std::vector<Module> ReadModules() {
     }
     socket_utils::write_u8(fd, (uint8_t) SocketAction::ReadModules);
     size_t len = socket_utils::read_usize(fd);
+    if (len > 4096) return modules;
     for (size_t i = 0; i < len; i++) {
         std::string name = socket_utils::read_string(fd);
         int module_fd = socket_utils::recv_fd(fd);
-        modules.emplace_back(name, module_fd);
+        if (module_fd < 0) {
+            LOGE("ReadModules: failed to receive fd for module '%s'", name.c_str());
+            break;
+        }
+        modules.emplace_back(std::move(name), module_fd);
     }
     return modules;
 }

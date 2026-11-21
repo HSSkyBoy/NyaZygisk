@@ -167,8 +167,9 @@ ElfImage::ElfImage(std::string path, uintptr_t base) : path_(std::move(path)), b
     }
 
     ehdr_ = reinterpret_cast<const ElfW(Ehdr)*>(file_);
-    if (!isElf(file_, file_size_) ||
-        ehdr_->e_shoff + static_cast<size_t>(ehdr_->e_shnum) * sizeof(ElfW(Shdr)) > file_size_) {
+    if (!isElf(file_, file_size_) || file_size_ < sizeof(ElfW(Ehdr)) ||
+        ehdr_->e_shoff > file_size_ ||
+        static_cast<size_t>(ehdr_->e_shnum) > (file_size_ - ehdr_->e_shoff) / sizeof(ElfW(Shdr))) {
         return;
     }
 
@@ -191,7 +192,7 @@ ElfImage::ElfImage(std::string path, uintptr_t base) : path_(std::move(path)), b
     if (ehdr_->e_shstrndx != SHN_UNDEF && ehdr_->e_shstrndx < ehdr_->e_shnum) {
         const ElfW(Shdr)* shdrs = reinterpret_cast<const ElfW(Shdr)*>(file_ + ehdr_->e_shoff);
         const ElfW(Shdr)* shstr = &shdrs[ehdr_->e_shstrndx];
-        if (shstr->sh_offset + shstr->sh_size <= file_size_)
+        if (shstr->sh_offset <= file_size_ && shstr->sh_size <= file_size_ - shstr->sh_offset)
             section_names_ = reinterpret_cast<const char*>(file_ + shstr->sh_offset);
     }
 
@@ -211,10 +212,12 @@ void ElfImage::parseSymbols(const ElfW(Shdr)* str_sh, const char* strtab,
         if (s.st_name == 0) continue;
         if (s.st_name >= str_sh->sh_size) continue;
         const char* name = strtab + s.st_name;
-        if (!name[0]) continue;
+        size_t max_len = str_sh->sh_size - s.st_name;
+        size_t len = strnlen(name, max_len);
+        if (len == 0 || len == max_len) continue;
 
         SymbolInfo info;
-        info.name = name;
+        info.name.assign(name, len);
         info.addr = bias + s.st_value;
         info.size = s.st_size;
         symbols_.push_back(std::move(info));
@@ -224,7 +227,12 @@ void ElfImage::parseSymbols(const ElfW(Shdr)* str_sh, const char* strtab,
 bool ElfImage::parseGnuDebugData(const uint8_t* data, size_t size) const {
     std::vector<uint8_t> out;
     if (!decompress_xz(data, size, out)) return false;
-    if (!isElf(out.data(), out.size())) return false;
+    if (!isElf(out.data(), out.size()) || out.size() < sizeof(ElfW(Ehdr))) return false;
+    const auto* deh = reinterpret_cast<const ElfW(Ehdr)*>(out.data());
+    if (deh->e_shoff > out.size() ||
+        static_cast<size_t>(deh->e_shnum) > (out.size() - deh->e_shoff) / sizeof(ElfW(Shdr))) {
+        return false;
+    }
 
     debugdata_ = std::move(out);
     debugdata_ehdr_ = reinterpret_cast<const ElfW(Ehdr)*>(debugdata_.data());
@@ -233,8 +241,8 @@ bool ElfImage::parseGnuDebugData(const uint8_t* data, size_t size) const {
 
 
 void ElfImage::ensureParsed() const {
+    std::lock_guard<std::mutex> lk(parse_mutex_);
     if (parsed_) return;
-    parsed_ = true;
 
     const uintptr_t bias = is_dyn_ ? base_ : 0;
     const ElfW(Shdr)* shdrs = reinterpret_cast<const ElfW(Shdr)*>(file_ + ehdr_->e_shoff);
@@ -244,7 +252,9 @@ void ElfImage::ensureParsed() const {
 
     auto sec_name = [&](const ElfW(Shdr)& sh) -> const char* {
         if (!section_names_ || sh.sh_name >= shstr_size) return "";
-        return section_names_ + sh.sh_name;
+        size_t max_len = shstr_size - sh.sh_name;
+        const char* p = section_names_ + sh.sh_name;
+        return strnlen(p, max_len) < max_len ? p : "";
     };
 
     // Iterate section headers directly.
@@ -252,15 +262,16 @@ void ElfImage::ensureParsed() const {
         const ElfW(Shdr)& sh = shdrs[i];
 
         if (sh.sh_type == SHT_SYMTAB || sh.sh_type == SHT_DYNSYM) {
-            if (sh.sh_link >= shnum) continue;
+            if (sh.sh_link >= shnum || sh.sh_entsize < sizeof(ElfW(Sym))) continue;
+            if (sh.sh_offset > file_size_ || sh.sh_size > file_size_ - sh.sh_offset) continue;
             const ElfW(Shdr)& str_sh = shdrs[sh.sh_link];
-            if (str_sh.sh_offset + str_sh.sh_size > file_size_) continue;
+            if (str_sh.sh_offset > file_size_ || str_sh.sh_size > file_size_ - str_sh.sh_offset) continue;
             const char* strtab = reinterpret_cast<const char*>(file_ + str_sh.sh_offset);
             const ElfW(Sym)* symtab = reinterpret_cast<const ElfW(Sym)*>(file_ + sh.sh_offset);
-            size_t count = (sh.sh_entsize) ? sh.sh_size / sh.sh_entsize : 0;
+            size_t count = sh.sh_size / sh.sh_entsize;
             parseSymbols(&str_sh, strtab, symtab, count, bias);
         } else if (sh.sh_type == SHT_PROGBITS && strcmp(sec_name(sh), ".gnu_debugdata") == 0 &&
-                   sh.sh_offset + sh.sh_size <= file_size_) {
+                   sh.sh_offset <= file_size_ && sh.sh_size <= file_size_ - sh.sh_offset) {
             parseGnuDebugData(file_ + sh.sh_offset, sh.sh_size);
         }
     }
@@ -268,32 +279,38 @@ void ElfImage::ensureParsed() const {
     // Mini debug info symbol table (addresses keep the same bias as the main image).
     if (debugdata_ehdr_) {
         const ElfW(Ehdr)* deh = debugdata_ehdr_;
+        const size_t dsize = debugdata_.size();
         const ElfW(Shdr)* dshdrs =
             reinterpret_cast<const ElfW(Shdr)*>(debugdata_.data() + deh->e_shoff);
         const size_t dshnum = deh->e_shnum;
         for (size_t i = 0; i < dshnum; ++i) {
             const ElfW(Shdr)& sh = dshdrs[i];
             if (sh.sh_type != SHT_SYMTAB) continue;
-            if (sh.sh_link >= dshnum) continue;
+            if (sh.sh_link >= dshnum || sh.sh_entsize < sizeof(ElfW(Sym))) continue;
+            if (sh.sh_offset > dsize || sh.sh_size > dsize - sh.sh_offset) continue;
             const ElfW(Shdr)& str_sh = dshdrs[sh.sh_link];
+            if (str_sh.sh_offset > dsize || str_sh.sh_size > dsize - str_sh.sh_offset) continue;
             const char* strtab = reinterpret_cast<const char*>(debugdata_.data() + str_sh.sh_offset);
             const ElfW(Sym)* symtab = reinterpret_cast<const ElfW(Sym)*>(debugdata_.data() + sh.sh_offset);
-            size_t count = (sh.sh_entsize) ? sh.sh_size / sh.sh_entsize : 0;
+            size_t count = sh.sh_size / sh.sh_entsize;
             parseSymbols(&str_sh, strtab, symtab, count, bias);
         }
     }
 
-    // De-duplicate by address, keeping the first occurrence.
-    std::unordered_set<uintptr_t> seen;
+    // De-duplicate by symbol name (keeping first occurrence) so ICF-merged functions
+    // and symbol aliases sharing the same address are preserved.
+    std::unordered_set<std::string> seen;
     std::vector<SymbolInfo> unique;
     unique.reserve(symbols_.size());
     for (auto& s : symbols_) {
-        if (seen.insert(s.addr).second) unique.push_back(std::move(s));
+        if (seen.insert(s.name).second) unique.push_back(std::move(s));
     }
     symbols_ = std::move(unique);
+    parsed_ = true;
 }
 
 const SymbolInfo* ElfImage::lookup(const char* name, bool prefix) const {
+    if (!name) return nullptr;
     ensureParsed();
     if (prefix) {
         size_t n = strlen(name);
@@ -381,8 +398,12 @@ uintptr_t ElfImage::runtimeLookup(const char* name, size_t* size) const {
 
     for (size_t i = 1; i < max_syms; ++i) {
         const ElfW(Sym)& s = symtab[i];
+        if (s.st_shndx == SHN_UNDEF) continue;
         if (s.st_name == 0 || s.st_name >= strsz) continue;
-        if (strcmp(strtab + s.st_name, name) == 0) {
+        const char* sym_name = strtab + s.st_name;
+        size_t max_len = strsz - s.st_name;
+        if (strnlen(sym_name, max_len) == max_len) continue;
+        if (strcmp(sym_name, name) == 0) {
             if (size) *size = s.st_size;
             return base_ + s.st_value;
         }
