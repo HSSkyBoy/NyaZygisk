@@ -219,9 +219,20 @@ bool dropSoPath(const char *target_path, bool unload, uintptr_t *out_base, size_
         target->setSize(0);
         if (unload) {
             auto cfi_backup = backup_cfi_shadow(target->getBase(), size);
+            bool was_constructed = target->getConstructorCalled();
             target->setConstructorCalled(false);
             SoInfoWrapper::soinfo_unload(target);
-            target->setConstructorCalled(true);
+            bool remains_linked = false;
+            for (auto *iter = solinker; iter; iter = iter->getNext()) {
+                if (iter == target) {
+                    remains_linked = true;
+                    break;
+                }
+            }
+            if (remains_linked) {
+                target->setConstructorCalled(was_constructed);
+                target->setSize(size);
+            }
             restore_cfi_shadow(cfi_backup);
         } else {
             SoInfoWrapper::soinfo_free(target);

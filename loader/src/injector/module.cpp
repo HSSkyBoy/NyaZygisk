@@ -59,7 +59,7 @@ bool ZygiskModule::RegisterModuleImpl(ApiTable *api, long *module) {
 
     long api_version = *module;
     // Unsupported version
-    if (api_version > ZYGISK_API_VERSION) return false;
+    if (api_version < 1 || api_version > ZYGISK_API_VERSION) return false;
 
     // Set the actual module_abi*
     api->base.impl->mod = {module};
@@ -82,7 +82,10 @@ bool ZygiskModule::RegisterModuleImpl(ApiTable *api, long *module) {
         api->v2.getFlags = [](auto) { return ZygiskModule::getFlags(); };
     }
     if (api_version >= 4) {
-        api->v4.pltHookCommit = []() { return lsplt::CommitHook(g_hook->cached_map_infos); };
+        api->v4.pltHookCommit = []() {
+            auto maps = scan_map_infos();
+            return lsplt::CommitHook(maps);
+        };
         api->v4.pltHookRegister = [](dev_t dev, ino_t inode, const char *symbol, void *fn,
                                      void **backup) {
             if (dev == 0 || inode == 0 || symbol == nullptr || fn == nullptr) return;
@@ -183,9 +186,9 @@ void ZygiskContext::plt_hook_exclude(const char *regex, const char *symbol) {
     ignore_info.emplace_back(IgnoreInfo{re, symbol ?: ""});
 }
 
-void ZygiskContext::plt_hook_process_regex() {
+void ZygiskContext::plt_hook_process_regex(const std::vector<lsplt::MapInfo> &maps) {
     if (register_info.empty()) return;
-    for (auto &map : g_hook->cached_map_infos) {
+    for (const auto &map : maps) {
         if (map.offset != 0 || !map.is_private || !(map.perms & PROT_READ)) continue;
         for (auto &reg : register_info) {
             if (regexec(&reg.regex, map.path.data(), 0, nullptr, 0) != 0) continue;
@@ -205,13 +208,16 @@ void ZygiskContext::plt_hook_process_regex() {
 }
 
 bool ZygiskContext::plt_hook_commit() {
+    auto maps = scan_map_infos();
     {
         mutex_guard lock(hook_info_lock);
-        plt_hook_process_regex();
+        plt_hook_process_regex(maps);
+        for (auto &reg : register_info) regfree(&reg.regex);
+        for (auto &ign : ignore_info) regfree(&ign.regex);
         register_info.clear();
         ignore_info.clear();
     }
-    return lsplt::CommitHook(g_hook->cached_map_infos);
+    return lsplt::CommitHook(maps);
 }
 
 // -----------------------------------------------------------------
@@ -349,7 +355,13 @@ void ZygiskContext::fork_pre() {
     // Do our own fork before loading any 3rd party code
     // First block SIGCHLD, unblock after original fork is done
     sigmask(SIG_BLOCK, SIGCHLD);
+    fork_attempted = true;
     pid = old_fork();
+    if (pid < 0) {
+        fork_errno = errno;
+        return;
+    }
+    child_process = (pid == 0);
 
     if (!is_child()) return;
 
@@ -367,6 +379,9 @@ void ZygiskContext::fork_pre() {
                     int fd = fast_atoi(d->d_name);
                     if (fd >= 0 && static_cast<size_t>(fd) < allowed_fds.size()) {
                         allowed_fds[fd] = true;
+                    } else if (fd > static_cast<int>(allowed_fds.size()) - 1 && fd < 65536) {
+                        allowed_fds.resize(static_cast<size_t>(fd) + 1, false);
+                        allowed_fds[fd] = true;
                     } else if (fd != fd_dir) {
                         close(fd);
                     }
@@ -374,7 +389,9 @@ void ZygiskContext::fork_pre() {
                 bpos += d->d_reclen;
             }
         }
-        allowed_fds[fd_dir] = false;
+        if (static_cast<size_t>(fd_dir) < allowed_fds.size()) {
+            allowed_fds[fd_dir] = false;
+        }
         close(fd_dir);
     }
 }
@@ -391,19 +408,39 @@ void ZygiskContext::run_modules_pre() {
     for (size_t i = 0; i < size; i++) {
         auto &m = ms[i];
         bool via_system = false;
-        if (void *handle = modloader::Dlopen(m.memfd, "zygisk-module", &via_system);
-            void *entry = handle ? modloader::Dlsym(handle, "zygisk_module_entry") : nullptr) {
-            modules.emplace_back(i, handle, entry);
+        void *handle = modloader::Dlopen(m.memfd, "zygisk-module", &via_system);
+        if (!handle) continue;
+        void *entry = modloader::Dlsym(handle, "zygisk_module_entry");
+        if (!entry) {
+            bool closed = modloader::Dlclose(handle);
+            if (via_system) {
+                extra_system_loaded++;
+                if (closed) extra_system_unloaded++;
+            }
+            continue;
         }
+        modules.emplace_back(i, handle, entry);
     }
 
-    for (auto &m : modules) {
-        m.onLoad(env);
-        if (flags & APP_SPECIALIZE) {
-            m.preAppSpecialize(args.app);
-        } else if (flags & SERVER_FORK_AND_SPECIALIZE) {
-            m.preServerSpecialize(args.server);
+    for (auto it = modules.begin(); it != modules.end();) {
+        it->onLoad(env);
+        if (!it->valid()) {
+            bool by_system = it->loadedBySystem();
+            it->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            bool closed = it->tryUnload();
+            if (by_system) {
+                extra_system_loaded++;
+                if (closed) extra_system_unloaded++;
+            }
+            it = modules.erase(it);
+            continue;
         }
+        if (flags & APP_SPECIALIZE) {
+            it->preAppSpecialize(args.app);
+        } else if (flags & SERVER_FORK_AND_SPECIALIZE) {
+            it->preServerSpecialize(args.server);
+        }
+        ++it;
     }
 }
 
@@ -422,8 +459,8 @@ void ZygiskContext::run_modules_post() {
     // Only modules that fell back to the system linker ended up in solist and
     // bumped g_module_load_counter; custom-linker modules leave no such trace,
     // so the scrub accounting must count only the system-loaded ones.
-    size_t system_loaded = 0;
-    size_t system_unloaded = 0;
+    size_t system_loaded = extra_system_loaded;
+    size_t system_unloaded = extra_system_unloaded;
     for (const auto &m : modules) {
         if (m.loadedBySystem()) system_loaded++;
     }
@@ -438,47 +475,54 @@ void ZygiskContext::run_modules_post() {
         }
     }
 
-    if (modules.size() > 0 && g_hook != nullptr) {
+    if (modules.size() > 0 || extra_system_loaded > 0) {
         LOGV("modules unloaded: %zu/%zu (system-loaded: %zu)", modules_unloaded, modules.size(),
              system_loaded);
-        if (modules.size() == modules_unloaded) clean_libc_trace();
+        if (modules_unloaded > 0 || extra_system_unloaded > 0) clean_libc_trace();
         // "zygisk-module" is the memfd name (zygiskd.rs:264); b4d31ab fixed the same
         // stale needle in spoof_virtual_maps but missed this call site. Custom-linker
         // modules are not in solist, so only scrub when something went through fallback.
         if (system_loaded > 0) {
             clean_linker_trace("zygisk-module", system_loaded, system_unloaded, true);
         }
-        g_hook->should_spoof_maps =
-            (flags & APP_SPECIALIZE) && (modules.size() - modules_unloaded) > 0;
+        if (g_hook != nullptr) {
+            g_hook->should_spoof_maps =
+                (flags & APP_SPECIALIZE) && (modules.size() - modules_unloaded) > 0;
+        }
     }
 }
 
 void ZygiskContext::app_specialize_pre() {
     uid_t uid = args.app->uid;
-    bool is_isolated_aid = uid >= AID_ISOLATED_START && uid <= AID_ISOLATED_END;
+    const uid_t app_id = uid % 100000;
+    bool is_isolated_aid =
+        (app_id >= AID_ISOLATED_START && app_id <= AID_ISOLATED_END) ||
+        (app_id >= 90000 && app_id < AID_ISOLATED_START);
     if (is_isolated_aid && args.app->app_data_dir) {
         const char *data_dir = nullptr;
         data_dir = env->GetStringUTFChars(args.app->app_data_dir, nullptr);
         if (data_dir != nullptr) {
             struct stat st;
             if (stat(data_dir, &st) != -1) {
-                // Correct uid for isolated services
+                // Correct uid for isolated services / app-zygotes
                 uid = st.st_uid;
             }
-            LOGV("Found isolated process [uid:%d, data_dir:%s]", uid, data_dir);
+            LOGV("Found isolated/app-zygote process [uid:%d, data_dir:%s]", uid, data_dir);
             env->ReleaseStringUTFChars(args.app->app_data_dir, data_dir);
         }
     }
 
     bool skip_zygiskd = false;
-    if (is_isolated_aid) {
+    if (is_isolated_aid && uid == static_cast<uid_t>(args.app->uid)) {
         UniqueFd fd = zygiskd::Connect(1);
         if (fd == -1) {
             skip_zygiskd = true;
         }
     }
 
-    if (!skip_zygiskd && info_flags == 0) info_flags = zygiskd::GetProcessFlags(uid);
+    if (!skip_zygiskd && (info_flags == 0 || uid != static_cast<uid_t>(args.app->uid))) {
+        info_flags = zygiskd::GetProcessFlags(uid);
+    }
 
     if ((info_flags & UNMOUNT_MASK) == UNMOUNT_MASK) {
         LOGV("[%s] is on the denylist", process);
@@ -527,6 +571,7 @@ void ZygiskContext::server_specialize_post() { run_modules_post(); }
 // -----------------------------------------------------------------
 
 void ZygiskContext::nativeSpecializeAppProcess_pre() {
+    child_process = true;
     process = env->GetStringUTFChars(args.app->nice_name, nullptr);
     LOGV("pre specialize [%s]", process);
     g_hook->anonymous_memory_enabled = is_anonymous_memory_enabled();
@@ -544,6 +589,7 @@ void ZygiskContext::nativeSpecializeAppProcess_post() {
 
 void ZygiskContext::nativeForkSystemServer_pre() {
     LOGV("pre forkSystemServer");
+    g_hook->anonymous_memory_enabled = is_anonymous_memory_enabled();
     flags |= SERVER_FORK_AND_SPECIALIZE;
 
     for (auto &map : g_hook->cached_map_infos) {
@@ -562,8 +608,8 @@ void ZygiskContext::nativeForkSystemServer_pre() {
 
     fork_pre();
     if (is_child()) {
-        server_specialize_pre();
         zygiskd::CacheMountNamespace(getpid());
+        server_specialize_pre();
     }
     sanitize_fds();
 }

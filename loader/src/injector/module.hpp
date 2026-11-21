@@ -268,8 +268,13 @@ struct ZygiskContext {
     std::list<ZygiskModule> modules;
 
     pid_t pid;
+    bool child_process;
+    bool fork_attempted;
+    int fork_errno;
     uint32_t flags;
     uint32_t info_flags;
+    size_t extra_system_loaded = 0;
+    size_t extra_system_unloaded = 0;
     std::vector<bool> allowed_fds;
     std::vector<int> exempted_fds;
 
@@ -304,17 +309,19 @@ struct ZygiskContext {
     void sanitize_fds();
     bool exempt_fd(int fd);
     bool can_exempt_fd() const;
-    bool is_child() const { return pid <= 0; }
+    bool is_child() const { return child_process; }
 
     // Compatibility shim
     void plt_hook_register(const char *regex, const char *symbol, void *fn, void **backup);
     void plt_hook_exclude(const char *regex, const char *symbol);
-    void plt_hook_process_regex();
+    void plt_hook_process_regex(const std::vector<lsplt::MapInfo> &maps);
 
     bool plt_hook_commit();
 
     static bool update_mount_namespace(zygiskd::MountNamespace namespace_type);
 };
+
+std::vector<lsplt::MapInfo> scan_map_infos();
 
 #undef DCL_PRE_POST
 
@@ -331,8 +338,6 @@ struct HookContext {
     bool should_unmap = false;
     bool skip_hooking_unloader = false;
     size_t zygote_unmounted_times = 0;
-    jint MODIFIER_NATIVE = 0;
-    jmethodID member_getModifiers = nullptr;
     std::vector<lsplt::MapInfo> cached_map_infos = {};
     std::vector<std::tuple<dev_t, ino_t, const char *, void **>> plt_backup;
     std::vector<mount_info> zygote_traces;

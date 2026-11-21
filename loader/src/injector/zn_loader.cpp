@@ -1,5 +1,6 @@
 #include "zn_loader.hpp"
 #include "zn_api.hpp"
+#include "zn_hook.hpp"
 #include "logging.hpp"
 #include "daemon.hpp"
 #include "dl.hpp"
@@ -11,12 +12,15 @@
 #include <limits.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 
 namespace zn {
 
 namespace {
+
+std::atomic<bool> g_zn_resident{false};
 
 std::string getProcessPath() {
     char buf[PATH_MAX];
@@ -42,8 +46,9 @@ std::string getProcessName() {
 
 constexpr char kZnMemfdName[] = "zn-module";
 
-bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system) {
+bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system, bool* unloaded_on_fail) {
     *via_system = false;
+    *unloaded_on_fail = false;
     void* lib = modloader::Dlopen(entry.lib_fd.get(), kZnMemfdName, via_system);
     if (!lib) {
         LOGE("ZN: load %s (fd %d) failed", entry.lib_path.c_str(), entry.lib_fd.get());
@@ -54,13 +59,15 @@ bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system) {
     auto* m = reinterpret_cast<ZygiskNextModule*>(modloader::Dlsym(lib, "zn_module"));
     if (!m || !m->onModuleLoaded) {
         LOGE("ZN: %s does not export zn_module", entry.lib_path.c_str());
+        *unloaded_on_fail = modloader::Dlclose(lib);
         zygiskd::ReportZnModule(entry.lib_path, false);
         return false;
     }
 
-    if (m->target_api_version > ZYGISK_NEXT_API_VERSION) {
-        LOGW("ZN: %s requires API version %d, only up to %d supported", entry.lib_path.c_str(),
+    if (m->target_api_version < 1 || m->target_api_version > ZYGISK_NEXT_API_VERSION) {
+        LOGW("ZN: %s requires API version %d, supported 1..%d", entry.lib_path.c_str(),
              m->target_api_version, ZYGISK_NEXT_API_VERSION);
+        *unloaded_on_fail = modloader::Dlclose(lib);
         zygiskd::ReportZnModule(entry.lib_path, false);
         return false;
     }
@@ -76,6 +83,7 @@ bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system) {
     }
 
     const ZygiskNextAPI* api = getApiForVersion(m->target_api_version);
+    g_zn_resident.store(true, std::memory_order_release);
 
     LOGI("ZN: loading module %s (companion=%s, api=%d)", entry.lib_path.c_str(),
          entry.companion ? "yes" : "no", m->target_api_version);
@@ -86,6 +94,10 @@ bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system) {
 
 }  // namespace
 
+bool hasResidentState() {
+    return g_zn_resident.load(std::memory_order_acquire) || zn::hook::hasActiveHooks();
+}
+
 void loadAllModules(unsigned char connect_retry) {
     const std::string proc_name = getProcessName();
     const std::string proc_path = getProcessPath();
@@ -95,14 +107,23 @@ void loadAllModules(unsigned char connect_retry) {
     auto plan = zygiskd::GetZnPlan(proc_name, proc_path, connect_retry);
     LOGI("ZN: received %zu module(s) from daemon", plan.size());
 
-    size_t loaded_count = 0;
     size_t system_loaded = 0;
+    size_t system_unloaded = 0;
+    const bool anon_mem = is_anonymous_memory_enabled();
     for (const auto& entry : plan) {
         if (entry.lib_fd.get() < 0) continue;
         bool via_system = false;
-        if (loadEntry(entry, &via_system)) {
-            loaded_count++;
-            if (via_system) system_loaded++;
+        bool unloaded_on_fail = false;
+        if (loadEntry(entry, &via_system, &unloaded_on_fail)) {
+            if (via_system) {
+                system_loaded++;
+                if (anon_mem) {
+                    spoof_fd_maps(entry.lib_fd.get(), /*private_only=*/true);
+                }
+            }
+        } else if (via_system) {
+            system_loaded++;
+            if (unloaded_on_fail) system_unloaded++;
         }
     }
 
@@ -110,9 +131,8 @@ void loadAllModules(unsigned char connect_retry) {
     // module path does once for every module instead of per-module. Custom-linker
     // modules leave no memfd mapping and no solist entry, so only scrub when at least
     // one module fell back to the system loader.
-    if (system_loaded > 0 && is_anonymous_memory_enabled()) {
-        spoof_virtual_maps(kZnMemfdName, /*private_only=*/true);
-        clean_linker_trace(kZnMemfdName, system_loaded, system_loaded, /*unload_soinfo=*/true);
+    if (system_loaded > 0) {
+        clean_linker_trace(kZnMemfdName, system_loaded, system_unloaded, /*unload_soinfo=*/true);
     }
 }
 

@@ -34,6 +34,7 @@ inline void setPltEngine(PltEngine e) {
 }
 
 inline void initPltEngineFromConfig() {
+    g_plt_engine_initialized = true;
     FILE* fp = fopen("/data/system/nyazygisk/config.prop", "re");
     if (!fp) return;
     char line[128];
@@ -51,7 +52,6 @@ inline void initPltEngineFromConfig() {
         }
     }
     fclose(fp);
-    g_plt_engine_initialized = true;
     LOGI("ZN hook: selected PLT engine: %s", g_plt_engine == PltEngine::kByteHook ? "ByteHook" : "LSPlt");
 }
 
@@ -72,14 +72,18 @@ inline std::map<std::string, void*> g_bytehook_originals;
 inline bool bytehookInit() {
     std::call_once(g_bytehook_init_once, [] {
         g_bytehook_init_result = bytehook_init(BYTEHOOK_MODE_MANUAL, false);
+        if (g_bytehook_init_result == 0) {
+            LOGI("ZN hook: ByteHook engine initialized successfully");
+        }
     });
     if (g_bytehook_init_result != 0) {
         LOGE("ZN hook: bytehook_init failed: %d", g_bytehook_init_result);
         return false;
     }
-    LOGI("ZN hook: ByteHook engine initialized successfully");
     return true;
 }
+
+inline bool hasActiveHooks() { return g_bytehook_init_result == 0; }
 
 extern "C" {
 static void bytehookHookedCallback(bytehook_stub_t stub, int status_code,
@@ -142,6 +146,8 @@ inline bool bytehookHook(const std::string& caller_path, const char* symbol, voi
     if (original) *original = backup;
     return true;
 }
+#else
+inline bool hasActiveHooks() { return false; }
 #endif
 
 inline bool lspltHook(dev_t dev, ino_t inode, const char* symbol, void* replacement,

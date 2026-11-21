@@ -55,8 +55,8 @@ public:
     }
 
     void setConstructorCalled(bool called) {
-        *reinterpret_cast<size_t *>(reinterpret_cast<uintptr_t>(this) +
-                                    field_constructor_called_offset) = called;
+        *reinterpret_cast<bool *>(reinterpret_cast<uintptr_t>(this) +
+                                  field_constructor_called_offset) = called;
     }
 };
 
