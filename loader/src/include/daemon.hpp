@@ -82,6 +82,7 @@ enum class SocketAction {
     GetZnPlan,
     ReportZnModule,
     RefreshModules,
+    RegisterZnCompanionBroker,
 };
 
 enum class MountNamespace { Clean, Root };
@@ -105,6 +106,10 @@ int UpdateMountNamespace(MountNamespace type);
 int ConnectCompanion(size_t index);
 
 int ConnectZnCompanion(const std::string& lib_path);
+
+bool RegisterZnCompanionBroker(const std::string& lib_path, int broker_fd);
+
+int ConnectZnCompanionViaBroker(int broker_fd);
 
 std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path,
                                    uint8_t retry = 1);

@@ -107,20 +107,6 @@ void api_forEachSymbols(ZnSymbolResolver* resolver,
     });
 }
 
-int api_connectCompanion(void* handle) {
-    auto* h = static_cast<ZnModuleHandle*>(handle);
-    if (!h || !h->companion || h->target_api_version < 3 || h->lib_path.empty()) {
-        return -1;
-    }
-    return zygiskd::ConnectZnCompanion(h->lib_path);
-}
-
-// Route HYOS fallback inline hooks through the chain manager so ZN modules
-// hooking the same symbol can coexist.
-bool inlineHookRaw(void* target, void* addr, void** original) {
-    return zn::hook::inlineHook(target, addr, original);
-}
-
 // ZN API v4 Runtime: the HyperOS Rust Runtime (HYOS)
 constexpr int kMaxHyosModules = 16;
 bool g_hyos_runtime = false;
@@ -134,6 +120,27 @@ pid_t g_spawner_pid = 0;
 // and the spawner is not guaranteed to go through libc fork().
 bool hyosInChild() {
     return g_spawner_pid != 0 && static_cast<pid_t>(syscall(__NR_getpid)) != g_spawner_pid;
+}
+
+int api_connectCompanion(void* handle) {
+    auto* h = static_cast<ZnModuleHandle*>(handle);
+    if (!h || !h->companion || h->target_api_version < 3 || h->lib_path.empty()) {
+        return -1;
+    }
+    if (h->companion_broker_fd >= 0) {
+        int fd = zygiskd::ConnectZnCompanionViaBroker(h->companion_broker_fd);
+        if (fd >= 0) return fd;
+        // Specialized app children cannot connect to cp64.sock (blocked by both
+        // SEPolicy and 0550 workdir DAC), so fail closed without noisy AVC denials.
+        if (hyosInChild()) return -1;
+    }
+    return zygiskd::ConnectZnCompanion(h->lib_path);
+}
+
+// Route HYOS fallback inline hooks through the chain manager so ZN modules
+// hooking the same symbol can coexist.
+bool inlineHookRaw(void* target, void* addr, void** original) {
+    return zn::hook::inlineHook(target, addr, original);
 }
 
 typedef int (*HyosSetcontextFn)(uid_t uid, int is_system_server, const char* se_info,
@@ -177,24 +184,39 @@ bool readProcCmdline(char* out, size_t max_len) {
     return complete;
 }
 
+bool isSpawnerCmdline(std::string_view cmdline) {
+    return cmdline.empty() || cmdline == "usap64" || cmdline == "usap32" ||
+           cmdline == "hyos_spawner" || cmdline.ends_with("/hyos_spawner");
+}
+
 void hyosDeliverAppSpecialized(const char* pkg_name, const char* se_info) {
     if (!hyosInChild() || g_hyos_fired || g_hyos_module_count == 0) return;
     g_hyos_fired = true;
 
     char process_name[256] = {};
     char package_name[256] = {};
-    char se_info_buf[64] = {};
-
-    if (g_cap_has_process_name && g_cap_process_name[0] != '\0') {
-        strlcpy(process_name, g_cap_process_name, sizeof(process_name));
-    } else if (!readProcCmdline(process_name, sizeof(process_name)) || process_name[0] == '\0') {
-        if (prctl(PR_GET_NAME, process_name, 0, 0, 0) != 0 || process_name[0] == '\0') {
-            strlcpy(process_name, "hyos_app", sizeof(process_name));
-        }
-    }
+    char se_info_buf[512] = {};
 
     strlcpy(package_name, pkg_name ? pkg_name : "", sizeof(package_name));
     strlcpy(se_info_buf, se_info ? se_info : "", sizeof(se_info_buf));
+
+    char cmdline_buf[256] = {};
+    if (readProcCmdline(cmdline_buf, sizeof(cmdline_buf)) && !isSpawnerCmdline(cmdline_buf)) {
+        strlcpy(process_name, cmdline_buf, sizeof(process_name));
+    } else if (g_cap_has_process_name && g_cap_process_name[0] != '\0') {
+        std::string_view cap(g_cap_process_name);
+        std::string_view pkg(package_name);
+        // pthread_setname_np is capped at 15 chars (TASK_COMM_LEN - 1) and hyos_spawner
+        // passes the trailing 15 chars (e.g. "m.miui.weather2" for "com.miui.weather2").
+        if (cap.size() == 15 && pkg.size() > 15 && pkg.ends_with(cap)) {
+            strlcpy(process_name, package_name, sizeof(process_name));
+        } else {
+            strlcpy(process_name, g_cap_process_name, sizeof(process_name));
+        }
+    } else if (prctl(PR_GET_NAME, process_name, 0, 0, 0) != 0 || process_name[0] == '\0') {
+        strlcpy(process_name, package_name[0] != '\0' ? package_name : "hyos_app",
+                sizeof(process_name));
+    }
 
     ZnHyosAppSpecializeArgs args = {process_name, package_name, se_info_buf};
     LOGI("HYOS app specialized: process=%s package=%s se_info=%s", process_name,

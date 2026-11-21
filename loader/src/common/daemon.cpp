@@ -269,6 +269,52 @@ int ConnectZnCompanion(const std::string& lib_path) {
     }
 }
 
+bool RegisterZnCompanionBroker(const std::string& lib_path, int broker_fd) {
+    UniqueFd fd = Connect(1);
+    if (fd == -1) {
+        PLOGE("RegisterZnCompanionBroker");
+        return false;
+    }
+    if (!socket_utils::write_u8(fd, (uint8_t) SocketAction::RegisterZnCompanionBroker) ||
+        !socket_utils::write_string(fd, lib_path) ||
+        !socket_utils::send_fd(fd, broker_fd)) {
+        PLOGE("RegisterZnCompanionBroker: write request");
+        return false;
+    }
+    return socket_utils::read_u8(fd) == 1;
+}
+
+int ConnectZnCompanionViaBroker(int broker_fd) {
+    if (broker_fd < 0) return -1;
+
+    int sv[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) {
+        PLOGE("ConnectZnCompanionViaBroker: socketpair");
+        return -1;
+    }
+
+    // Only sendmsg() is permitted on the inherited zygote-owned SOCK_DGRAM broker
+    // socket under stock AOSP appdomain SEPolicy (fd:use + unix_dgram_socket:write).
+    if (!socket_utils::send_fd(broker_fd, sv[1])) {
+        PLOGE("ConnectZnCompanionViaBroker: send_fd");
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    close(sv[1]);
+
+    // Wait for the companion process to write its 1-byte readiness ack before
+    // handing the stream to the module unconstrained by our handshake timeout.
+    constexpr int kBrokerAckTimeoutMs = 5000;
+    SetSocketTimeout(sv[0], kBrokerAckTimeoutMs);
+    if (socket_utils::read_u8(sv[0]) == 1) {
+        SetSocketTimeout(sv[0], 0);
+        return sv[0];
+    }
+    close(sv[0]);
+    return -1;
+}
+
 std::vector<ZnPlanEntry> GetZnPlan(const std::string& process_name, const std::string& process_path,
                                    uint8_t retry) {
     std::vector<ZnPlanEntry> entries;

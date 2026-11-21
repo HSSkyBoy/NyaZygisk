@@ -9,6 +9,7 @@ struct ZnModuleHandle {
     std::string lib_path;
     bool companion = false;
     int target_api_version = 0;
+    int companion_broker_fd = -1;
 };
 
 const ZygiskNextAPI* getApiForVersion(int target_api_version);

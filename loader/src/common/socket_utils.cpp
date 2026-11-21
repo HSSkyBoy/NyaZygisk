@@ -190,4 +190,46 @@ int recv_fd(int sockfd) {
     memcpy(&result, data, sizeof(int));
     return result;
 }
+
+bool send_fd(int sockfd, int fd) {
+    if (fd < 0) {
+        errno = EBADF;
+        return false;
+    }
+
+    uint8_t dummy = 1;
+    struct iovec iov = {
+        .iov_base = &dummy,
+        .iov_len = sizeof(dummy),
+    };
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } control = {};
+    struct msghdr msg = {
+        .msg_name = nullptr,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control.buf,
+        .msg_controllen = sizeof(control.buf),
+        .msg_flags = 0,
+    };
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+    msg.msg_controllen = cmsg->cmsg_len;
+
+    ssize_t ret;
+    do {
+        ret = sendmsg(sockfd, &msg, MSG_NOSIGNAL);
+    } while (ret < 0 && errno == EINTR);
+    if (ret != static_cast<ssize_t>(sizeof(dummy))) {
+        if (ret >= 0) errno = EIO;
+        return false;
+    }
+    return true;
+}
 }  // namespace socket_utils

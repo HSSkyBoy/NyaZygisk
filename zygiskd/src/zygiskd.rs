@@ -61,6 +61,10 @@ struct AppContext {
     modules: RwLock<Arc<Vec<Module>>>,
     mount_manager: Arc<MountNamespaceManager>,
     zn_companions: Mutex<HashMap<PathBuf, Arc<Mutex<Option<UnixStream>>>>>,
+    /// Write ends of cancellation pipes for active `hyos_spawner` SOCK_DGRAM companion
+    /// broker threads, keyed by canonical module path. Replacing an entry drops the old
+    /// pipe write end, waking the old thread's `poll()` so it exits cleanly.
+    zn_brokers: Mutex<HashMap<PathBuf, OwnedFd>>,
     zn_states: Mutex<HashMap<PathBuf, (u32, u32)>>,
     /// Companions spawned and not yet waited for. A companion is a child of a daemon
     /// that never exits, so one that exits stays a zombie until `reap_companions` runs.
@@ -174,6 +178,7 @@ pub fn main(tmp_path: Option<&str>, self_exe: PathBuf) -> Result<()> {
         modules: RwLock::new(Arc::new(modules)),
         mount_manager,
         zn_companions: Mutex::new(HashMap::new()),
+        zn_brokers: Mutex::new(HashMap::new()),
         zn_states: Mutex::new(HashMap::new()),
         pending_companions: Mutex::new(Vec::new()),
     });
@@ -226,7 +231,7 @@ pub fn main(tmp_path: Option<&str>, self_exe: PathBuf) -> Result<()> {
 }
 
 /// Handles a single incoming connection from Zygisk on a worker thread.
-fn handle_connection(mut stream: UnixStream, context: &AppContext) -> Result<()> {
+fn handle_connection(mut stream: UnixStream, context: &Arc<AppContext>) -> Result<()> {
     let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
 
@@ -362,6 +367,17 @@ fn handle_connection(mut stream: UnixStream, context: &AppContext) -> Result<()>
                 return Ok(());
             }
             handle_report_zn_module(&mut stream, context)?;
+        }
+        DaemonSocketAction::RegisterZnCompanionBroker => {
+            if peer != Some(0) {
+                warn!(
+                    "RegisterZnCompanionBroker: rejecting request from non-root peer {:?}",
+                    peer
+                );
+                stream.write_u8(0)?;
+                return Ok(());
+            }
+            handle_register_zn_companion_broker(&mut stream, context)?;
         }
     }
     Ok(())
@@ -884,26 +900,17 @@ fn is_allowed_zn_companion(canonical_lib: &Path) -> bool {
     false
 }
 
-fn handle_request_zn_companion_socket(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
-    let raw_lib_path = stream.read_string()?;
-    let canonical_lib = match fs::canonicalize(&raw_lib_path) {
-        Ok(p) if is_allowed_zn_companion(&p) => p,
-        _ => {
-            warn!(
-                "RequestZnCompanionSocket: rejecting unregistered ZN companion `{}`",
-                raw_lib_path
-            );
-            stream.write_u8(0)?;
-            return Ok(());
-        }
-    };
-
+/// Forwards `client_fd` to the ZN companion process for `canonical_lib`, spawning (or
+/// respawning) the companion on demand. Returns `true` if the FD was handed to the
+/// companion (which is then responsible for writing the 1-byte readiness ack), or `false`
+/// if forwarding failed and the caller should fail the client connection.
+fn dispatch_zn_companion_fd(context: &AppContext, canonical_lib: &Path, client_fd: RawFd) -> bool {
     // Acquire only a per-module mutex so spawning one ZN companion does not block others.
     let slot = {
         let mut table = context.zn_companions.lock().unwrap();
         Arc::clone(
             table
-                .entry(canonical_lib.clone())
+                .entry(canonical_lib.to_path_buf())
                 .or_insert_with(|| Arc::new(Mutex::new(None))),
         )
     };
@@ -920,7 +927,8 @@ fn handle_request_zn_companion_socket(stream: &mut UnixStream, context: &AppCont
     }
 
     if companion.is_none() {
-        match spawn_zn_companion(context, &canonical_lib) {
+        context.reap_companions();
+        match spawn_zn_companion(context, canonical_lib) {
             Ok(Some(sock)) => {
                 trace!(
                     "Spawned new ZN companion for `{}`.",
@@ -945,21 +953,214 @@ fn handle_request_zn_companion_socket(stream: &mut UnixStream, context: &AppCont
     }
 
     if let Some(sock) = companion.as_ref() {
-        let _ = stream.set_read_timeout(None);
-        let _ = stream.set_write_timeout(None);
-        if let Err(e) = sock.send_fd(stream.as_raw_fd()) {
-            error!(
-                "Failed to send ZN companion FD for `{}`: {}",
+        match sock.send_fd(client_fd) {
+            Ok(()) => return true,
+            Err(e) => {
+                error!(
+                    "Failed to send ZN companion FD for `{}`: {}",
+                    canonical_lib.display(),
+                    e
+                );
+                // Drop the broken companion socket so the next request can respawn cleanly.
+                companion.take();
+            }
+        }
+    }
+    false
+}
+
+fn handle_request_zn_companion_socket(stream: &mut UnixStream, context: &AppContext) -> Result<()> {
+    let raw_lib_path = stream.read_string()?;
+    let canonical_lib = match fs::canonicalize(&raw_lib_path) {
+        Ok(p) if is_allowed_zn_companion(&p) => p,
+        _ => {
+            warn!(
+                "RequestZnCompanionSocket: rejecting unregistered ZN companion `{}`",
+                raw_lib_path
+            );
+            stream.write_u8(0)?;
+            return Ok(());
+        }
+    };
+
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+    if !dispatch_zn_companion_fd(context, &canonical_lib, stream.as_raw_fd()) {
+        stream.write_u8(0)?;
+    }
+    // If dispatch succeeded, the companion itself writes the 1-byte readiness ack.
+    Ok(())
+}
+
+fn handle_register_zn_companion_broker(
+    stream: &mut UnixStream,
+    context: &Arc<AppContext>,
+) -> Result<()> {
+    let raw_lib_path = stream.read_string()?;
+    let broker_fd = utils::recv_fd_cloexec(stream.as_raw_fd())
+        .context("RegisterZnCompanionBroker: failed to receive broker FD")?;
+
+    let canonical_lib = match fs::canonicalize(&raw_lib_path) {
+        Ok(p) if is_allowed_zn_companion(&p) => p,
+        _ => {
+            warn!(
+                "RegisterZnCompanionBroker: rejecting unregistered ZN companion `{}`",
+                raw_lib_path
+            );
+            stream.write_u8(0)?;
+            return Ok(());
+        }
+    };
+
+    let mut sock_type: libc::c_int = 0;
+    let mut sock_type_len = size_of::<libc::c_int>() as libc::socklen_t;
+    let getsock_ok = unsafe {
+        libc::getsockopt(
+            broker_fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut sock_type as *mut _ as *mut libc::c_void,
+            &mut sock_type_len,
+        )
+    };
+    if getsock_ok != 0 || sock_type != libc::SOCK_DGRAM {
+        warn!(
+            "RegisterZnCompanionBroker: expected SOCK_DGRAM broker FD for `{}`, got type={}",
+            canonical_lib.display(),
+            sock_type
+        );
+        stream.write_u8(0)?;
+        return Ok(());
+    }
+
+    let mut pipe_fds = [-1 as libc::c_int; 2];
+    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let err = Error::last_os_error();
+        warn!(
+            "RegisterZnCompanionBroker: pipe2 failed for `{}`: {}",
+            canonical_lib.display(),
+            err
+        );
+        stream.write_u8(0)?;
+        return Ok(());
+    }
+    let cancel_read = unsafe { std::os::fd::FromRawFd::from_raw_fd(pipe_fds[0]) };
+    let cancel_write = unsafe { std::os::fd::FromRawFd::from_raw_fd(pipe_fds[1]) };
+
+    let broker_ctx = Arc::clone(context);
+    let broker_lib = canonical_lib.clone();
+    match thread::Builder::new()
+        .name("zn-broker".to_string())
+        .spawn(move || {
+            run_zn_companion_broker(broker_fd, cancel_read, broker_lib, broker_ctx);
+        }) {
+        Ok(_) => {
+            // Replacing any previous cancel_write drops its FD, waking any superseded
+            // broker thread (e.g. after a hyos_spawner restart) so it exits cleanly.
+            context
+                .zn_brokers
+                .lock()
+                .unwrap()
+                .insert(canonical_lib.clone(), cancel_write);
+            info!(
+                "Registered ZN companion broker for `{}`",
+                canonical_lib.display()
+            );
+            stream.write_u8(1)?;
+        }
+        Err(e) => {
+            warn!(
+                "Failed to spawn ZN companion broker thread for `{}`: {}",
                 canonical_lib.display(),
                 e
             );
             stream.write_u8(0)?;
         }
-        // If successful, the companion itself will notify the client.
-    } else {
-        stream.write_u8(0)?;
     }
     Ok(())
+}
+
+fn run_zn_companion_broker(
+    broker_fd: OwnedFd,
+    cancel_read: OwnedFd,
+    canonical_lib: PathBuf,
+    context: Arc<AppContext>,
+) {
+    let mut pfds = [
+        libc::pollfd {
+            fd: broker_fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: cancel_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+
+    loop {
+        pfds[0].revents = 0;
+        pfds[1].revents = 0;
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, -1) };
+        if ret < 0 {
+            let err = Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            warn!(
+                "ZN companion broker poll failed for `{}`: {}",
+                canonical_lib.display(),
+                err
+            );
+            break;
+        }
+
+        if pfds[1].revents != 0 {
+            debug!(
+                "ZN companion broker for `{}` superseded, exiting.",
+                canonical_lib.display()
+            );
+            break;
+        }
+
+        if (pfds[0].revents & (libc::POLLERR | libc::POLLNVAL)) != 0 {
+            warn!(
+                "ZN companion broker socket error for `{}` (revents={:#x})",
+                canonical_lib.display(),
+                pfds[0].revents
+            );
+            break;
+        }
+
+        if (pfds[0].revents & libc::POLLIN) != 0 {
+            match utils::recv_fd_cloexec(broker_fd.as_raw_fd()) {
+                Ok(client_fd) => {
+                    if !dispatch_zn_companion_fd(&context, &canonical_lib, client_fd.as_raw_fd()) {
+                        let fail_ack: u8 = 0;
+                        unsafe {
+                            libc::send(
+                                client_fd.as_raw_fd(),
+                                &fail_ack as *const u8 as *const libc::c_void,
+                                1,
+                                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "ZN companion broker recv_fd failed for `{}`: {}",
+                        canonical_lib.display(),
+                        e
+                    );
+                    if e.raw_os_error() == Some(libc::EBADF) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn spawn_zn_companion(context: &AppContext, lib_path: &Path) -> Result<Option<UnixStream>> {

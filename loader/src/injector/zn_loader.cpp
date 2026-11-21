@@ -10,6 +10,8 @@
 
 #include <dlfcn.h>
 #include <limits.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -80,6 +82,32 @@ bool loadEntry(const zygiskd::ZnPlanEntry& entry, bool* via_system, bool* unload
     if (entry.companion && m->target_api_version < 3) {
         LOGW("ZN: module %s declares companion but targets API %d (< 3), skipping companion process",
              entry.lib_path.c_str(), m->target_api_version);
+    } else if (entry.companion && m->target_api_version >= 3 && zn::isHyosRuntime()) {
+        // Specialized hyos_spawner children drop to an app UID and appdomain SELinux
+        // context, where neither DAC nor SEPolicy allows connecting to cp64.sock.
+        // Pre-create a zygote-labeled SOCK_DGRAM socketpair while still root/zygote
+        // and inherit the client end across fork: stock AOSP appdomain policy allows
+        // zygote:fd use + zygote:unix_dgram_socket write with zero extra sepolicy rules.
+        int sv[2] = {-1, -1};
+        if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, sv) == 0) {
+            struct timeval tv{
+                .tv_sec = 3,
+                .tv_usec = 0,
+            };
+            setsockopt(sv[0], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            if (zygiskd::RegisterZnCompanionBroker(entry.lib_path, sv[1])) {
+                handle->companion_broker_fd = sv[0];
+                LOGI("ZN: registered HYOS companion broker fd=%d for %s", sv[0],
+                     entry.lib_path.c_str());
+            } else {
+                LOGW("ZN: failed to register HYOS companion broker for %s",
+                     entry.lib_path.c_str());
+                close(sv[0]);
+            }
+            close(sv[1]);
+        } else {
+            PLOGE("ZN: socketpair for HYOS companion broker");
+        }
     }
 
     const ZygiskNextAPI* api = getApiForVersion(m->target_api_version);
