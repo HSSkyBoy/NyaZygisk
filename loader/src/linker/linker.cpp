@@ -1,10 +1,13 @@
 #include "linker.hpp"
 
 #include <dlfcn.h>
+#include <sys/auxv.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -37,11 +40,31 @@ int ToProt(ElfW(Word) p_flags) {
     return prot;
 }
 
-// Call a GNU ifunc resolver and return the address it selects. bionic uses the
-// same no-argument cast; resolvers that read hwcap args tolerate the extra
-// registers being whatever they are.
+// Call a GNU ifunc resolver matching Bionic's per-architecture ABI.
 ElfW(Addr) CallIfuncResolver(uintptr_t resolver_addr) {
+#if defined(__aarch64__)
+    struct Aarch64IfuncArg {
+        unsigned long size;
+        unsigned long hwcap;
+        unsigned long hwcap2;
+    };
+    constexpr unsigned long kIfuncArgHwcap = (1ULL << 62);
+    unsigned long hwcap = getauxval(AT_HWCAP);
+    unsigned long hwcap2 = getauxval(AT_HWCAP2);
+    Aarch64IfuncArg arg{sizeof(Aarch64IfuncArg), hwcap, hwcap2};
+    using ResolverFn = ElfW(Addr) (*)(uint64_t, const Aarch64IfuncArg *);
+    return reinterpret_cast<ResolverFn>(resolver_addr)(hwcap | kIfuncArgHwcap, &arg);
+#elif defined(__arm__)
+    unsigned long hwcap = getauxval(AT_HWCAP);
+    using ResolverFn = ElfW(Addr) (*)(unsigned long);
+    return reinterpret_cast<ResolverFn>(resolver_addr)(hwcap);
+#elif defined(__riscv)
+    unsigned long hwcap = getauxval(AT_HWCAP);
+    using ResolverFn = ElfW(Addr) (*)(uint64_t, void *, void *);
+    return reinterpret_cast<ResolverFn>(resolver_addr)(hwcap, nullptr, nullptr);
+#else
     return reinterpret_cast<ElfW(Addr) (*)()>(resolver_addr)();
+#endif
 }
 
 uintptr_t AlignUp(uintptr_t v, uintptr_t a) { return (v + a - 1) & ~(a - 1); }
@@ -69,10 +92,19 @@ bool PreadFull(int fd, void *dst, size_t len, off_t off) {
     return true;
 }
 
-// Registry of images we loaded, so Dlsym/Dlclose/IsOurHandle and the dladdr
-// interpose can map an address or handle back to an Image.
-std::mutex g_images_lock;
-std::vector<Image *> g_images;
+// Heap-allocated registry of images we loaded. Keeping the mutex and vector on
+// the heap (rather than inside libzygisk.so's .data/.bss VMA) ensures that
+// anonymizing resident libzygisk.so via copy+mremap never tears FUTEX_PRIVATE
+// waiter bits or replaces the physical page backing a contended futex.
+struct ImageRegistry {
+    std::mutex lock;
+    std::vector<std::shared_ptr<Image>> images;
+};
+
+ImageRegistry &Registry() {
+    static ImageRegistry *reg = new ImageRegistry();
+    return *reg;
+}
 
 }  // namespace
 
@@ -89,16 +121,32 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
     size_t max_align = pg;
     uintptr_t min_vaddr = UINTPTR_MAX;
     uintptr_t max_vaddr = 0;
+    bool needs_page_compat = false;
     for (const auto &ph : phdrs) {
         if (ph.p_type != PT_LOAD) continue;
-        if (ph.p_align > max_align) max_align = ph.p_align;
+        if (ph.p_align > max_align && (ph.p_align & (ph.p_align - 1)) == 0) {
+            max_align = ph.p_align;
+        }
         if (ph.p_vaddr < min_vaddr) min_vaddr = ph.p_vaddr;
         if (ph.p_vaddr + ph.p_memsz > max_vaddr) max_vaddr = ph.p_vaddr + ph.p_memsz;
+        if (((ph.p_vaddr ^ ph.p_offset) & (pg - 1)) != 0 || (ph.p_align > 0 && ph.p_align < pg)) {
+            needs_page_compat = true;
+        }
     }
-    if (min_vaddr == UINTPTR_MAX) {
-        LOGE("linker: no PT_LOAD segments in %s", name_.c_str());
+    if (min_vaddr == UINTPTR_MAX || max_vaddr <= min_vaddr) {
+        LOGE("linker: no valid PT_LOAD segments in %s", name_.c_str());
         *err = LoadError::kError;
         return false;
+    }
+
+    // 16 KiB page compatibility mode: 4 KiB-aligned ELFs have p_vaddr % 16K !=
+    // p_offset % 16K or segments sharing a 16 KiB page, so file-backed mmap
+    // cannot place segments at their intra-page offsets. Upgrade to anonymous
+    // pread mapping so every segment lands at its exact virtual offset.
+    if (!anonymous && needs_page_compat) {
+        LOGI("linker: %s uses sub-%zuB segment alignment; enabling page-size compat mode",
+             name_.c_str(), pg);
+        anonymous = true;
     }
 
     min_vaddr = PageStart(min_vaddr, pg);
@@ -135,7 +183,7 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
     //   file-backed: mmap each segment from `fd` (memfd), then hand-zero the
     //     .bss tail that shares the last file page.
     for (const auto &ph : phdrs) {
-        if (ph.p_type != PT_LOAD) continue;
+        if (ph.p_type != PT_LOAD || ph.p_memsz == 0) continue;
 
         uintptr_t seg_start = load_bias_ + PageStart(ph.p_vaddr, pg);
         uintptr_t seg_file_end = load_bias_ + ph.p_vaddr + ph.p_filesz;
@@ -160,7 +208,7 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
         }
 
         // Map the file portion writable (we relocate before Protect()).
-        uintptr_t file_page_end = PageEnd(seg_file_end, pg);
+        uintptr_t file_page_end = (ph.p_filesz > 0) ? PageEnd(seg_file_end, pg) : seg_start;
         if (ph.p_filesz > 0) {
             off_t file_off = static_cast<off_t>(PageStart(ph.p_offset, pg));
             size_t len = file_page_end - seg_start;
@@ -173,11 +221,6 @@ bool Image::MapSegments(int fd, const ElfW(Ehdr) & ehdr, const std::vector<ElfW(
             }
             // Zero the .bss bytes that share the last file-backed page with
             // initialized data: everything from filesz to the end of that page.
-            // This must run whenever the segment has memsz beyond filesz — even
-            // when the whole .bss fits inside this page (seg_mem_end ==
-            // file_page_end). The old `seg_mem_end > file_page_end` guard
-            // skipped that case, leaving file bytes in .bss (e.g. a zero-init
-            // global reading back as the lld version string).
             if (ph.p_memsz > ph.p_filesz && file_page_end > seg_file_end) {
                 memset(reinterpret_cast<void *>(seg_file_end), 0, file_page_end - seg_file_end);
             }
@@ -373,7 +416,7 @@ bool Image::ParseDynamic(LoadError *err) {
     if (sysv_bucket_ != nullptr) {
         dynsym_count_ = sysv_nchain_;
     } else if (has_gnu_hash_ && gnu_nbucket_ > 0) {
-        uint32_t max_idx = gnu_symndx_;
+        uint32_t max_idx = 0;
         for (size_t i = 0; i < gnu_nbucket_; i++) {
             if (gnu_bucket_[i] > max_idx) max_idx = gnu_bucket_[i];
         }
@@ -426,7 +469,9 @@ static const ElfW(Sym) *
                   size_t gnu_nbucket, uint32_t gnu_symndx, uint32_t gnu_maskwords,
                   uint32_t gnu_shift2, const ElfW(Addr) *gnu_bloom, const uint32_t *sysv_bucket,
                   const uint32_t *sysv_chain, size_t sysv_nbucket) {
+    if (name == nullptr) return nullptr;
     if (has_gnu) {
+        if (gnu_maskwords == 0 || gnu_nbucket == 0) return nullptr;
         uint32_t hash = GnuHash(name);
         constexpr uint32_t kBits = sizeof(ElfW(Addr)) * 8;
         ElfW(Addr) word = gnu_bloom[(hash / kBits) % gnu_maskwords];
@@ -439,7 +484,8 @@ static const ElfW(Sym) *
         do {
             if ((gnu_chain[n] | 1) == (hash | 1)) {
                 const ElfW(Sym) *s = &symtab[n];
-                if (s->st_shndx != SHN_UNDEF && strcmp(strtab + s->st_name, name) == 0) {
+                if (s->st_shndx != SHN_UNDEF && ELF_ST_BIND(s->st_info) != STB_LOCAL &&
+                    strcmp(strtab + s->st_name, name) == 0) {
                     return s;
                 }
             }
@@ -447,11 +493,12 @@ static const ElfW(Sym) *
         return nullptr;
     }
 
-    if (sysv_bucket != nullptr) {
+    if (sysv_bucket != nullptr && sysv_nbucket > 0) {
         uint32_t hash = SysvHash(name);
         for (uint32_t n = sysv_bucket[hash % sysv_nbucket]; n != 0; n = sysv_chain[n]) {
             const ElfW(Sym) *s = &symtab[n];
-            if (s->st_shndx != SHN_UNDEF && strcmp(strtab + s->st_name, name) == 0) {
+            if (s->st_shndx != SHN_UNDEF && ELF_ST_BIND(s->st_info) != STB_LOCAL &&
+                strcmp(strtab + s->st_name, name) == 0) {
                 return s;
             }
         }
@@ -474,21 +521,30 @@ const char *Image::AddrToSym(const void *addr, void **out_saddr) const {
     auto a = reinterpret_cast<uintptr_t>(addr);
     if (a < map_start_ || a >= map_start_ + map_size_ || dynsym_count_ == 0) return nullptr;
     ElfW(Addr) target = a - load_bias_;  // back to a module vaddr
+#if defined(__arm__)
+    target &= ~static_cast<ElfW(Addr)>(1);
+#endif
 
     const char *best_name = nullptr;
     ElfW(Addr) best_val = 0;
+    ElfW(Addr) best_raw_val = 0;
     for (size_t i = 0; i < dynsym_count_; i++) {
         const ElfW(Sym) &s = symtab_[i];
         if (s.st_shndx == SHN_UNDEF || s.st_name == 0) continue;
         unsigned t = ELF_ST_TYPE(s.st_info);
         if (t != STT_FUNC && t != STT_OBJECT && t != STT_GNU_IFUNC) continue;
-        if (s.st_value > target) continue;         // symbol starts after addr
-        if (best_name != nullptr && s.st_value < best_val) continue;  // farther back
-        best_val = s.st_value;
+        ElfW(Addr) sym_val = s.st_value;
+#if defined(__arm__)
+        if (t == STT_FUNC || t == STT_GNU_IFUNC) sym_val &= ~static_cast<ElfW(Addr)>(1);
+#endif
+        if (sym_val > target) continue;                               // symbol starts after addr
+        if (best_name != nullptr && sym_val < best_val) continue;     // farther back
+        best_val = sym_val;
+        best_raw_val = s.st_value;
         best_name = strtab_ + s.st_name;
     }
     if (best_name == nullptr) return nullptr;
-    if (out_saddr != nullptr) *out_saddr = reinterpret_cast<void *>(load_bias_ + best_val);
+    if (out_saddr != nullptr) *out_saddr = reinterpret_cast<void *>(load_bias_ + best_raw_val);
     return best_name;
 }
 
@@ -538,13 +594,13 @@ bool Image::Relocate(LoadError *err) {
 
     bool ok = true;
 
-    auto apply = [&](ElfW(Addr) offset, uint64_t info, int64_t addend) {
+    auto apply = [&](ElfW(Addr) offset, uint64_t info, int64_t addend, bool has_explicit_addend) {
         uint32_t type = RELOC_R_TYPE(info);
         uint32_t sym = RELOC_R_SYM(info);
         auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + offset);
 
         auto where_addr = reinterpret_cast<uintptr_t>(where);
-        if (where_addr < map_start_ || where_addr >= map_start_ + map_size_) {
+        if (where_addr < map_start_ || where_addr > map_start_ + map_size_ - sizeof(ElfW(Addr))) {
             LOGE("linker: %s relocation target %p out of mapped range [%p,%p), type=%u",
                  name_.c_str(), where, reinterpret_cast<void *>(map_start_),
                  reinterpret_cast<void *>(map_start_ + map_size_), type);
@@ -562,6 +618,10 @@ bool Image::Relocate(LoadError *err) {
             return;
         }
 
+        if (!has_explicit_addend && type != RELOC_JUMP_SLOT) {
+            addend = static_cast<int64_t>(static_cast<intptr_t>(*where));
+        }
+
         if (type == RELOC_RELATIVE) {
             *where = load_bias_ + addend;
             return;
@@ -571,33 +631,35 @@ bool Image::Relocate(LoadError *err) {
             return;
         }
 
-        // Symbol-based relocation.
-        const ElfW(Sym) *s = &symtab_[sym];
-        const char *sym_name = strtab_ + s->st_name;
+        // Symbol-based relocation. Per ELF spec, symbol index 0 (STN_UNDEF) resolves to 0.
         ElfW(Addr) value = 0;
+        if (sym != 0) {
+            const ElfW(Sym) *s = &symtab_[sym];
+            const char *sym_name = strtab_ + s->st_name;
 
-        if (s->st_shndx != SHN_UNDEF) {
-            // Defined in this module (local or global): resolve module-first to
-            // our own definition. For an ifunc, st_value is the resolver — call
-            // it, as bionic does for the relocating object.
-            value = load_bias_ + s->st_value;
-            if (ELF_ST_TYPE(s->st_info) == STT_GNU_IFUNC) value = CallIfuncResolver(value);
-        } else {
-            // Undefined here: resolve externally. dlsym already runs an ifunc
-            // resolver, so nothing extra to do for those.
-            bool weak_undef = false;
-            void *resolved = ResolveSymbol(sym_name, &weak_undef);
-            if (resolved == nullptr) {
-                if (ELF_ST_BIND(s->st_info) == STB_WEAK) {
-                    value = 0;  // Permitted: weak undefined resolves to 0.
-                } else {
-                    LOGE("linker: %s cannot resolve symbol '%s'", name_.c_str(), sym_name);
-                    *err = LoadError::kError;
-                    ok = false;
-                    return;
-                }
+            if (s->st_shndx != SHN_UNDEF) {
+                // Defined in this module (local or global): resolve module-first to
+                // our own definition. For an ifunc, st_value is the resolver — call
+                // it, as bionic does for the relocating object.
+                value = load_bias_ + s->st_value;
+                if (ELF_ST_TYPE(s->st_info) == STT_GNU_IFUNC) value = CallIfuncResolver(value);
             } else {
-                value = reinterpret_cast<ElfW(Addr)>(resolved);
+                // Undefined here: resolve externally. dlsym already runs an ifunc
+                // resolver, so nothing extra to do for those.
+                bool weak_undef = false;
+                void *resolved = ResolveSymbol(sym_name, &weak_undef);
+                if (resolved == nullptr) {
+                    if (ELF_ST_BIND(s->st_info) == STB_WEAK) {
+                        value = 0;  // Permitted: weak undefined resolves to 0.
+                    } else {
+                        LOGE("linker: %s cannot resolve symbol '%s'", name_.c_str(), sym_name);
+                        *err = LoadError::kError;
+                        ok = false;
+                        return;
+                    }
+                } else {
+                    value = reinterpret_cast<ElfW(Addr)>(resolved);
+                }
             }
         }
 
@@ -608,13 +670,7 @@ bool Image::Relocate(LoadError *err) {
                 *where = value;
                 break;
             case RELOC_GLOB_DAT:
-#if (RELOC_ABS) == (RELOC_GLOB_DAT)
-                // riscv64 folds GLOB_DAT and ABS into one type (R_RISCV_64),
-                // which carries an addend.
                 *where = value + addend;
-#else
-                *where = value;
-#endif
                 break;
 #if (RELOC_ABS) != (RELOC_GLOB_DAT)
             case RELOC_ABS:
@@ -631,13 +687,26 @@ bool Image::Relocate(LoadError *err) {
 
     // RELR first (relative-only, cheapest).
     if (relr_ != nullptr && relr_count_ > 0) {
-        ForEachRelr(relr_, relr_count_, load_bias_,
-                    [&](ElfW(Addr) *w) { *w += load_bias_; });
+        ForEachRelr(relr_, relr_count_, load_bias_, [&](ElfW(Addr) *w) {
+            auto wa = reinterpret_cast<uintptr_t>(w);
+            if (wa < map_start_ || wa > map_start_ + map_size_ - sizeof(ElfW(Addr))) {
+                LOGE("linker: %s RELR target %p out of mapped range", name_.c_str(), w);
+                *err = LoadError::kError;
+                ok = false;
+                return;
+            }
+            *w += load_bias_;
+        });
+        if (!ok) return false;
     }
 
     // APS2 packed.
     if (android_rel_ != nullptr && android_rel_size_ > 0) {
-        if (!ForEachPackedReloc(android_rel_, android_rel_size_, apply)) {
+        const bool is_rela = android_is_rela_;
+        if (!ForEachPackedReloc(android_rel_, android_rel_size_,
+                                [&](ElfW(Addr) off, uint64_t info, int64_t add) {
+                                    if (ok) apply(off, info, add, is_rela);
+                                })) {
             *err = LoadError::kError;
             return false;
         }
@@ -646,12 +715,11 @@ bool Image::Relocate(LoadError *err) {
 
     // Plain RELA.
     for (size_t i = 0; i < rela_count_ && ok; i++) {
-        apply(rela_[i].r_offset, rela_[i].r_info, rela_[i].r_addend);
+        apply(rela_[i].r_offset, rela_[i].r_info, rela_[i].r_addend, /*has_explicit_addend=*/true);
     }
-    // Plain REL (implicit addend read from the slot).
+    // Plain REL (implicit addend read from the slot after bounds validation).
     for (size_t i = 0; i < rel_count_ && ok; i++) {
-        auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + rel_[i].r_offset);
-        apply(rel_[i].r_offset, rel_[i].r_info, static_cast<int64_t>(static_cast<intptr_t>(*where)));
+        apply(rel_[i].r_offset, rel_[i].r_info, 0, /*has_explicit_addend=*/false);
     }
 
     // PLT relocations (JMPREL). With BIND_NOW these resolve eagerly; we always
@@ -660,14 +728,14 @@ bool Image::Relocate(LoadError *err) {
         if (plt_is_rela_) {
             auto *r = reinterpret_cast<const ElfW(Rela) *>(plt_rel_);
             size_t n = plt_rel_size_ / sizeof(ElfW(Rela));
-            for (size_t i = 0; i < n && ok; i++) apply(r[i].r_offset, r[i].r_info, r[i].r_addend);
+            for (size_t i = 0; i < n && ok; i++) {
+                apply(r[i].r_offset, r[i].r_info, r[i].r_addend, /*has_explicit_addend=*/true);
+            }
         } else {
             auto *r = reinterpret_cast<const ElfW(Rel) *>(plt_rel_);
             size_t n = plt_rel_size_ / sizeof(ElfW(Rel));
             for (size_t i = 0; i < n && ok; i++) {
-                auto *where = reinterpret_cast<ElfW(Addr) *>(load_bias_ + r[i].r_offset);
-                apply(r[i].r_offset, r[i].r_info,
-                      static_cast<int64_t>(static_cast<intptr_t>(*where)));
+                apply(r[i].r_offset, r[i].r_info, 0, /*has_explicit_addend=*/false);
             }
         }
     }
@@ -681,10 +749,18 @@ bool Image::Relocate(LoadError *err) {
 
 bool Image::SetSegmentProtections() {
     const size_t pg = PageSize();
+    if (map_size_ == 0 || (map_size_ % pg) != 0) return false;
+    const size_t num_pages = map_size_ / pg;
+    // Compute the union of segment permissions per page so 4 KiB-aligned ELFs
+    // running on 16 KiB page kernels retain both execute and write permissions
+    // on shared boundary pages instead of stripping PROT_EXEC.
+    std::vector<int> page_prots(num_pages, -1);
+
     for (size_t i = 0; i < phnum_; i++) {
-        if (phdr_[i].p_type != PT_LOAD) continue;
+        if (phdr_[i].p_type != PT_LOAD || phdr_[i].p_memsz == 0) continue;
         uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
         uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
+        if (start < map_start_ || end > map_start_ + map_size_) return false;
         int prot = ToProt(phdr_[i].p_flags);
 #if defined(__aarch64__)
         // Enforce BTI on executable segments only when the module advertised it
@@ -692,40 +768,41 @@ bool Image::SetSegmentProtections() {
         // landing pads would fault indirect branches into it.
         if (wants_bti_ && (prot & PROT_EXEC)) prot |= PROT_BTI;
 #endif
-        // Writable segments keep PROT_WRITE here so relocations (and the RELRO
-        // region, which lives inside a PF_W segment) can still be written; the
-        // RELRO range is sealed read-only later in ApplyRelro.
-        //
-        // The return value matters: on an anonymous mapping this mprotect is
-        // what actually makes the text segment executable (MapSegments only
-        // opened it PROT_READ|PROT_WRITE). If this is silently ignored and the
-        // call fails — e.g. SELinux/seccomp denying PROT_EXEC on anonymous
-        // memory on a given device/kernel — the segment is left non-executable
-        // and the module SIGSEGVs the instant anything (including an ifunc
-        // resolver, called right after this) tries to run from it. Treat that
-        // as a load failure so the caller can fall back to android_dlopen_ext
-        // instead of continuing with a half-protected module.
-        if (mprotect(reinterpret_cast<void *>(start), end - start, prot) != 0) {
+        size_t first_pg = (start - map_start_) / pg;
+        size_t last_pg = (end - map_start_) / pg;
+        for (size_t p = first_pg; p < last_pg; p++) {
+            page_prots[p] = (page_prots[p] < 0) ? prot : (page_prots[p] | prot);
+        }
+    }
+
+    for (size_t p = 0; p < num_pages;) {
+        if (page_prots[p] < 0) {
+            p++;
+            continue;
+        }
+        int prot = page_prots[p];
+        size_t run_end = p + 1;
+        while (run_end < num_pages && page_prots[run_end] == prot) run_end++;
+
+        uintptr_t start = map_start_ + p * pg;
+        size_t len = (run_end - p) * pg;
+        if (mprotect(reinterpret_cast<void *>(start), len, prot) != 0) {
 #if defined(__aarch64__)
-            // PROT_BTI specifically can be rejected on its own (e.g. an older
-            // kernel that does not recognize the bit) even though the base
-            // protection would succeed. Retry without it rather than failing
-            // the whole load over a hardening extra: a module is no less safe
-            // running without BTI enforcement than it already is on a kernel
-            // that cannot honour the request.
             if (prot & PROT_BTI) {
                 int fallback_prot = prot & ~PROT_BTI;
-                if (mprotect(reinterpret_cast<void *>(start), end - start, fallback_prot) == 0) {
+                if (mprotect(reinterpret_cast<void *>(start), len, fallback_prot) == 0) {
                     LOGW("linker: %s PROT_BTI rejected for segment at %p, continuing without it",
                          name_.c_str(), reinterpret_cast<void *>(start));
+                    p = run_end;
                     continue;
                 }
             }
 #endif
             LOGE("linker: %s mprotect(%p, %zu, 0x%x) failed: %s", name_.c_str(),
-                 reinterpret_cast<void *>(start), end - start, prot, strerror(errno));
+                 reinterpret_cast<void *>(start), len, prot, strerror(errno));
             return false;
         }
+        p = run_end;
     }
     return true;
 }
@@ -733,23 +810,67 @@ bool Image::SetSegmentProtections() {
 void Image::ApplyRelro() {
     const size_t pg = PageSize();
     for (size_t i = 0; i < phnum_; i++) {
-        if (phdr_[i].p_type != PT_GNU_RELRO) continue;
-        uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
-        uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
-        mprotect(reinterpret_cast<void *>(start), end - start, PROT_READ);
+        if (phdr_[i].p_type != PT_GNU_RELRO || phdr_[i].p_memsz == 0) continue;
+        const uintptr_t relro_vstart = phdr_[i].p_vaddr;
+        const uintptr_t relro_vend = phdr_[i].p_vaddr + phdr_[i].p_memsz;
+        const uintptr_t first_page_v = PageStart(relro_vstart, pg);
+        const uintptr_t last_page_v = PageEnd(relro_vend, pg);
+
+        // Seal only pages that do not share space with an executable segment or
+        // with non-RELRO writable bytes (.data/.bss on 4 KiB-aligned ELFs under
+        // 16 KiB kernels).
+        uintptr_t run_start = 0;
+        uintptr_t run_end = 0;
+        auto flush_run = [&]() {
+            if (run_end > run_start) {
+                mprotect(reinterpret_cast<void *>(load_bias_ + run_start), run_end - run_start,
+                         PROT_READ);
+            }
+            run_start = run_end = 0;
+        };
+
+        for (uintptr_t pv = first_page_v; pv < last_page_v; pv += pg) {
+            const uintptr_t pe = pv + pg;
+            bool safe_to_seal = true;
+            for (size_t j = 0; j < phnum_; j++) {
+                if (phdr_[j].p_type != PT_LOAD || phdr_[j].p_memsz == 0) continue;
+                const uintptr_t sv = phdr_[j].p_vaddr;
+                const uintptr_t se = sv + phdr_[j].p_memsz;
+                if (se <= pv || sv >= pe) continue;  // no overlap with this page
+
+                if (phdr_[j].p_flags & PF_X) {
+                    safe_to_seal = false;
+                    break;
+                }
+                if (phdr_[j].p_flags & PF_W) {
+                    const uintptr_t ov_start = std::max(sv, pv);
+                    const uintptr_t ov_end = std::min(se, pe);
+                    if (ov_start < relro_vstart || ov_end > relro_vend) {
+                        safe_to_seal = false;
+                        break;
+                    }
+                }
+            }
+            if (safe_to_seal) {
+                if (run_end == pv && run_end != 0) {
+                    run_end = pe;
+                } else {
+                    flush_run();
+                    run_start = pv;
+                    run_end = pe;
+                }
+            } else {
+                flush_run();
+            }
+        }
+        flush_run();
     }
 
     // Clear cache per PT_LOAD segment, not over [map_start_, map_start_ +
     // map_size_) as a whole: that whole-reservation span can include padding
-    // between segments that was never covered by any PT_LOAD (MapSegments
-    // only touches each segment's own byte range, leaving any gap at the
-    // PROT_NONE the initial reservation mmap set it to). A loader whose
-    // segments carry unmapped alignment padding between them — a real,
-    // if less common, ELF layout — turns a clear_cache call over the full
-    // span into a read on a PROT_NONE page: SIGSEGV (SEGV_ACCERR), fatal and
-    // unrecoverable at this point in Load(), in the middle of zygote.
+    // between segments that was never covered by any PT_LOAD.
     for (size_t i = 0; i < phnum_; i++) {
-        if (phdr_[i].p_type != PT_LOAD) continue;
+        if (phdr_[i].p_type != PT_LOAD || phdr_[i].p_memsz == 0) continue;
         uintptr_t start = load_bias_ + PageStart(phdr_[i].p_vaddr, pg);
         uintptr_t end = load_bias_ + PageEnd(phdr_[i].p_vaddr + phdr_[i].p_memsz, pg);
         __builtin___clear_cache(reinterpret_cast<char *>(start), reinterpret_cast<char *>(end));
@@ -781,23 +902,31 @@ void Image::CallDestructors() {
 
 Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
     *err = LoadError::kNone;
+    if (fd < 0) {
+        *err = LoadError::kError;
+        return nullptr;
+    }
 
     ElfW(Ehdr) ehdr;
-    if (pread(fd, &ehdr, sizeof(ehdr), 0) != static_cast<ssize_t>(sizeof(ehdr))) {
+    if (!PreadFull(fd, &ehdr, sizeof(ehdr), 0)) {
         LOGE("linker: cannot read ELF header of %s", name);
         *err = LoadError::kError;
         return nullptr;
     }
     if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
-        ehdr.e_ident[EI_CLASS] != ELFCLASS_NATIVE || ehdr.e_type != ET_DYN) {
-        LOGE("linker: %s is not a native ET_DYN shared object", name);
+        ehdr.e_ident[EI_CLASS] != ELFCLASS_NATIVE ||
+        ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
+        ehdr.e_type != ET_DYN ||
+        ehdr.e_machine != ELFMACHINE_NATIVE ||
+        ehdr.e_phnum == 0 || ehdr.e_phentsize != sizeof(ElfW(Phdr))) {
+        LOGE("linker: %s is not a compatible native ET_DYN shared object", name);
         *err = LoadError::kError;
         return nullptr;
     }
 
     std::vector<ElfW(Phdr)> phdrs(ehdr.e_phnum);
-    if (pread(fd, phdrs.data(), ehdr.e_phnum * sizeof(ElfW(Phdr)), ehdr.e_phoff) !=
-        static_cast<ssize_t>(ehdr.e_phnum * sizeof(ElfW(Phdr)))) {
+    if (!PreadFull(fd, phdrs.data(), ehdr.e_phnum * sizeof(ElfW(Phdr)),
+                   static_cast<off_t>(ehdr.e_phoff))) {
         LOGE("linker: cannot read program headers of %s", name);
         *err = LoadError::kError;
         return nullptr;
@@ -812,35 +941,34 @@ Image *Image::Load(int fd, const char *name, bool anonymous, LoadError *err) {
         }
     }
 
-    auto *img = new Image();
+    std::shared_ptr<Image> img(new Image());
     img->name_ = name ? name : "(anonymous)";
 
     if (!img->MapSegments(fd, ehdr, phdrs, anonymous, err) || !img->ParseDynamic(err)) {
-        delete img;  // ~Image unmaps whatever was mapped.
-        return nullptr;
+        return nullptr;  // ~Image unmaps whatever was mapped.
     }
 
     // Final protections (text R-X) BEFORE relocation, so ifunc resolvers the
     // relocation pass may call are executable; then relocate, then seal RELRO.
     if (!img->SetSegmentProtections()) {
         *err = LoadError::kError;
-        delete img;
         return nullptr;
     }
     if (!img->Relocate(err)) {
-        delete img;
         return nullptr;
     }
     img->ApplyRelro();
 
     // Register before running constructors so dladdr / dl_iterate_phdr (e.g.
     // C++ exception unwinding) inside .init_array can already see this image.
+    Image *raw_handle = img.get();
     {
-        std::lock_guard<std::mutex> lk(g_images_lock);
-        g_images.push_back(img);
+        auto &reg = Registry();
+        std::lock_guard<std::mutex> lk(reg.lock);
+        reg.images.push_back(img);
     }
     img->CallConstructors();
-    return img;
+    return raw_handle;
 }
 
 Image::~Image() {
@@ -864,70 +992,81 @@ void *Dlopen(int fd, const char *name, bool anonymous, LoadError *err) {
 }
 
 void *Dlsym(void *handle, const char *name) {
-    if (handle == nullptr) return nullptr;
-    auto *img = static_cast<Image *>(handle);
+    if (handle == nullptr || name == nullptr) return nullptr;
+    std::shared_ptr<Image> pinned;
     {
-        std::lock_guard<std::mutex> lk(g_images_lock);
-        bool known = false;
-        for (auto *i : g_images) {
-            if (i == img) {
-                known = true;
+        auto &reg = Registry();
+        std::lock_guard<std::mutex> lk(reg.lock);
+        for (const auto &i : reg.images) {
+            if (i.get() == handle) {
+                pinned = i;
                 break;
             }
         }
-        if (!known) return nullptr;
     }
-    return img->Symbol(name);
+    if (!pinned) return nullptr;
+    return pinned->Symbol(name);
 }
 
 bool Dlclose(void *handle) {
-    auto *img = static_cast<Image *>(handle);
+    if (handle == nullptr) return false;
+    std::shared_ptr<Image> dying;
     {
-        std::lock_guard<std::mutex> lk(g_images_lock);
-        auto it = g_images.end();
-        for (auto i = g_images.begin(); i != g_images.end(); ++i) {
-            if (*i == img) {
-                it = i;
+        auto &reg = Registry();
+        std::lock_guard<std::mutex> lk(reg.lock);
+        for (auto it = reg.images.begin(); it != reg.images.end(); ++it) {
+            if (it->get() == handle) {
+                dying = std::move(*it);
+                reg.images.erase(it);
                 break;
             }
         }
-        if (it == g_images.end()) return false;
-        g_images.erase(it);
     }
-    delete img;
-    return true;
+    return dying != nullptr;
 }
 
 bool IsOurHandle(void *handle) {
-    std::lock_guard<std::mutex> lk(g_images_lock);
-    for (auto *i : g_images) {
-        if (i == handle) return true;
+    if (handle == nullptr) return false;
+    auto &reg = Registry();
+    std::lock_guard<std::mutex> lk(reg.lock);
+    for (const auto &i : reg.images) {
+        if (i.get() == handle) return true;
     }
     return false;
 }
 
 bool HasLoadedImages() {
-    std::lock_guard<std::mutex> lk(g_images_lock);
-    return !g_images.empty();
+    auto &reg = Registry();
+    std::lock_guard<std::mutex> lk(reg.lock);
+    return !reg.images.empty();
 }
 
 void WithImagesLocked(void (*fn)(void *), void *arg) {
-    std::lock_guard<std::mutex> lk(g_images_lock);
+    auto &reg = Registry();
+    std::lock_guard<std::mutex> lk(reg.lock);
     fn(arg);
 }
 
 // Used by interpose.cpp's dladdr override.
-Image *FindImageByAddress(const void *addr) {
-    std::lock_guard<std::mutex> lk(g_images_lock);
-    for (auto *i : g_images) {
+std::shared_ptr<Image> FindImageByAddress(const void *addr) {
+    auto &reg = Registry();
+    std::lock_guard<std::mutex> lk(reg.lock);
+    for (const auto &i : reg.images) {
         if (i->Contains(addr)) return i;
     }
     return nullptr;
 }
 
 void ForEachImage(void (*fn)(Image *, void *), void *arg) {
-    std::lock_guard<std::mutex> lk(g_images_lock);
-    for (auto *i : g_images) fn(i, arg);
+    std::vector<std::shared_ptr<Image>> snapshot;
+    {
+        auto &reg = Registry();
+        std::lock_guard<std::mutex> lk(reg.lock);
+        snapshot = reg.images;
+    }
+    for (const auto &i : snapshot) {
+        fn(i.get(), arg);
+    }
 }
 
 bool GnuPropertyNoteHasBti(const uint8_t *note, size_t size) {

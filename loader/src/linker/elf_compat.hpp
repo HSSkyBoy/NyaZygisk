@@ -18,6 +18,18 @@
 #define RELOC_R_SYM(info) ELF32_R_SYM(info)
 #endif
 
+#if defined(__aarch64__)
+#define ELFMACHINE_NATIVE EM_AARCH64
+#elif defined(__x86_64__)
+#define ELFMACHINE_NATIVE EM_X86_64
+#elif defined(__i386__)
+#define ELFMACHINE_NATIVE EM_386
+#elif defined(__arm__)
+#define ELFMACHINE_NATIVE EM_ARM
+#elif defined(__riscv)
+#define ELFMACHINE_NATIVE EM_RISCV
+#endif
+
 // DT_RELR is the standard tag; some headers still only ship the Android
 // pre-standard aliases. Define whichever is absent so the switch can list both.
 #ifndef DT_RELR
