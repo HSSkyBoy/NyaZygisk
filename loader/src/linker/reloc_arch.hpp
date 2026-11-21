@@ -73,6 +73,23 @@ namespace linker {
 #endif
 #define LINKER_USES_RELA 0
 
+#elif defined(__i386__)
+
+#define RELOC_RELATIVE R_386_RELATIVE
+#define RELOC_GLOB_DAT R_386_GLOB_DAT
+#define RELOC_JUMP_SLOT R_386_JMP_SLOT
+#define RELOC_ABS R_386_32
+#define RELOC_IRELATIVE R_386_IRELATIVE
+#define RELOC_TLS_DTPMOD R_386_TLS_DTPMOD32
+#define RELOC_TLS_DTPREL R_386_TLS_DTPOFF32
+#define RELOC_TLS_TPREL R_386_TLS_TPOFF
+#ifdef R_386_TLS_DESC
+#define RELOC_TLSDESC R_386_TLS_DESC
+#else
+#define RELOC_TLSDESC 0xffffffffu
+#endif
+#define LINKER_USES_RELA 0
+
 #else
 #error "linker: unsupported architecture"
 #endif

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -171,7 +172,7 @@ bool HasLoadedImages();
 void WithImagesLocked(void (*fn)(void *), void *arg);
 
 // Internal helpers shared with interpose.cpp. Not part of the module-facing API.
-Image *FindImageByAddress(const void *addr);
+std::shared_ptr<Image> FindImageByAddress(const void *addr);
 void ForEachImage(void (*fn)(Image *, void *), void *arg);
 
 // Parse a .note.gnu.property note (the contents a PT_GNU_PROPERTY segment

@@ -53,7 +53,7 @@ int MyIteratePhdr(int (*cb)(dl_phdr_info *, size_t, void *), void *data) {
 // ---- dladdr ----------------------------------------------------------------
 
 int MyDladdr(const void *addr, Dl_info *info) {
-    Image *img = FindImageByAddress(addr);
+    std::shared_ptr<Image> img = FindImageByAddress(addr);
     if (img == nullptr) return dladdr(addr, info);
 
     // Synthesize a Dl_info: fname/fbase name the image, and a reverse symbol
@@ -88,7 +88,7 @@ int MyDlclose(void *handle) {
 extern "C" _Unwind_Ptr __real_dl_unwind_find_exidx(_Unwind_Ptr pc, int *pcount);
 
 _Unwind_Ptr MyUnwindFindExidx(_Unwind_Ptr pc, int *pcount) {
-    Image *img = FindImageByAddress(reinterpret_cast<const void *>(pc));
+    std::shared_ptr<Image> img = FindImageByAddress(reinterpret_cast<const void *>(pc));
     if (img != nullptr) {
         const ElfW(Phdr) *ph = img->phdr();
         for (size_t i = 0; i < img->phnum(); i++) {

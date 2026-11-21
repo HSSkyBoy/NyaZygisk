@@ -7,21 +7,24 @@ namespace linker {
 
 // ---- SLEB128 ---------------------------------------------------------------
 // APS2 (DT_ANDROID_REL[A]) encodes its stream as signed LEB128 groups.
-static int64_t ReadSleb128(const uint8_t *&p, const uint8_t *end) {
-    int64_t value = 0;
+static bool ReadSleb128(const uint8_t *&p, const uint8_t *end, int64_t *out) {
+    uint64_t value = 0;
     size_t shift = 0;
-    uint8_t byte;
+    uint8_t byte = 0;
     do {
-        if (p >= end) return value;
+        if (p >= end) return false;
         byte = *p++;
-        value |= static_cast<int64_t>(byte & 0x7f) << shift;
+        if (shift < 64) {
+            value |= static_cast<uint64_t>(byte & 0x7f) << shift;
+        }
         shift += 7;
     } while (byte & 0x80);
     // Sign-extend if the last byte's sign bit is set and we have room.
     if (shift < 64 && (byte & 0x40)) {
-        value |= -(static_cast<int64_t>(1) << shift);
+        value |= (~uint64_t{0}) << shift;
     }
-    return value;
+    *out = static_cast<int64_t>(value);
+    return true;
 }
 
 // APS2 group flags.
@@ -48,18 +51,37 @@ bool ForEachPackedReloc(const uint8_t *stream, size_t size,
     // bionic's for_all_packed_relocs, where `reloc` is a single struct carried
     // through every group. Resetting addend per group (an earlier bug) corrupts
     // IRELATIVE resolver addresses and RELATIVE targets.
-    const int64_t total = ReadSleb128(p, end);
-    ElfW(Addr) r_offset = ReadSleb128(p, end);
+    int64_t total = 0;
+    int64_t init_offset = 0;
+    if (!ReadSleb128(p, end, &total) || !ReadSleb128(p, end, &init_offset) || total < 0) {
+        LOGE("linker: truncated or invalid APS2 header");
+        return false;
+    }
+    ElfW(Addr) r_offset = static_cast<ElfW(Addr)>(init_offset);
     uint64_t r_info = 0;
     int64_t r_addend = 0;
 
     for (int64_t idx = 0; idx < total;) {
-        const int64_t group_size = ReadSleb128(p, end);
-        const uint64_t flags = ReadSleb128(p, end);
+        int64_t group_size = 0;
+        int64_t raw_flags = 0;
+        if (!ReadSleb128(p, end, &group_size) || !ReadSleb128(p, end, &raw_flags) ||
+            group_size <= 0 || group_size > total - idx) {
+            LOGE("linker: invalid APS2 group header");
+            return false;
+        }
+        const uint64_t flags = static_cast<uint64_t>(raw_flags);
 
         ElfW(Addr) group_delta = 0;
-        if (flags & kGroupedByOffsetDelta) group_delta = ReadSleb128(p, end);
-        if (flags & kGroupedByInfo) r_info = ReadSleb128(p, end);
+        if (flags & kGroupedByOffsetDelta) {
+            int64_t d = 0;
+            if (!ReadSleb128(p, end, &d)) return false;
+            group_delta = static_cast<ElfW(Addr)>(d);
+        }
+        if (flags & kGroupedByInfo) {
+            int64_t info_val = 0;
+            if (!ReadSleb128(p, end, &info_val)) return false;
+            r_info = static_cast<uint64_t>(info_val);
+        }
 
         // Addend accumulator semantics (RELA), mirroring bionic exactly: a group
         // WITHOUT GROUP_HAS_ADDEND resets the running addend to 0 — not only when
@@ -71,13 +93,29 @@ bool ForEachPackedReloc(const uint8_t *stream, size_t size,
             r_addend = 0;
         } else if (flags & kGroupedByAddend) {
             // Addend shared by the whole group: one delta, applied once.
-            r_addend += ReadSleb128(p, end);
+            int64_t ad = 0;
+            if (!ReadSleb128(p, end, &ad)) return false;
+            r_addend += ad;
         }
 
         for (int64_t i = 0; i < group_size; i++) {
-            r_offset += (flags & kGroupedByOffsetDelta) ? group_delta : ReadSleb128(p, end);
-            if (!(flags & kGroupedByInfo)) r_info = ReadSleb128(p, end);
-            if (has_addend && !(flags & kGroupedByAddend)) r_addend += ReadSleb128(p, end);
+            if (flags & kGroupedByOffsetDelta) {
+                r_offset += group_delta;
+            } else {
+                int64_t od = 0;
+                if (!ReadSleb128(p, end, &od)) return false;
+                r_offset += static_cast<ElfW(Addr)>(od);
+            }
+            if (!(flags & kGroupedByInfo)) {
+                int64_t iv = 0;
+                if (!ReadSleb128(p, end, &iv)) return false;
+                r_info = static_cast<uint64_t>(iv);
+            }
+            if (has_addend && !(flags & kGroupedByAddend)) {
+                int64_t ad = 0;
+                if (!ReadSleb128(p, end, &ad)) return false;
+                r_addend += ad;
+            }
             emit(r_offset, r_info, r_addend);
         }
         idx += group_size;
