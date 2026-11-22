@@ -233,6 +233,7 @@ void run_shell_script(const std::string &cwd, const std::string &script, const c
     if (async) {
         pid_t child = fork_dont_care();
         if (child == 0) {
+            detach_stdio();
             if (!cwd.empty()) (void) chdir(cwd.c_str());
             if (arg != nullptr) {
                 execl("/system/bin/sh", "sh", script.c_str(), arg, nullptr);
@@ -264,10 +265,10 @@ void run_shell_script(const std::string &cwd, const std::string &script, const c
     }
 }
 
-void run_spoof_props(const std::string &moddir, const char *stage_arg) {
+void run_spoof_props(const std::string &moddir, const char *stage_arg, bool async) {
     std::string script = moddir + "/spoof-props.sh";
     if (!is_regular_file(script)) return;
-    run_shell_script(moddir, script, stage_arg, /*async=*/false);
+    run_shell_script(moddir, script, stage_arg, async);
 }
 
 std::string resolve_self_exe() {
@@ -309,8 +310,6 @@ bool bootstrap_monitor(const std::string &moddir) {
 
     install_lib(moddir + "/lib64/libzygisk.so", work_dir + "/lib64/libzygisk.so");
     install_lib(moddir + "/lib/libzygisk.so", work_dir + "/lib/libzygisk.so");
-
-    run_spoof_props(moddir, "early");
 
     std::string self_exe = resolve_self_exe();
     if (self_exe.empty()) return false;
@@ -462,7 +461,7 @@ int stage_post_mount() {
 }
 
 int stage_service(const std::string &moddir) {
-    run_spoof_props(moddir, "late");
+    run_spoof_props(moddir, "late", /*async=*/true);
 
     // ksud and apd run every enabled module's service.sh themselves, and announce themselves
     // through KSU and APATCH. Magisk runs only those of the modules it mounts, which leaves out
