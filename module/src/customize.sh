@@ -191,13 +191,12 @@ if [ "$HUAWEI_MAPLE_ENABLED" = "1" ]; then
   echo "ro.maple.enable=0" >>"$MODPATH/system.prop"
 fi
 
-# NeoZygisk is binaries and scripts only, so none of what it installs waits for a boot
-# stage: hotinstall.sh replaces the running monitor, which is all an update needs.
-# The Maple workaround above is the one exception. KernelSU loads a
-# system.prop from post-fs-data and from late load, but its hot-install path deliberately
-# loads none, so a build that wrote one has to take the reboot.
-if [ "$KSU" ] && [ ! -f "$MODPATH/system.prop" ]; then
-  ui_print "- Applying without a reboot"
+# Only hot-install on a temp-root (KSU_LATE_LOAD=1) fresh install where no previous
+# NyaZygisk session is running and no system.prop needs a boot stage. Any in-place
+# upgrade or persistent-root install requires a reboot so a fresh zygote maps the new
+# libzygisk.so cleanly alongside the new monitor and daemon.
+if [ "$KSU" ] && [ "$KSU_LATE_LOAD" = "1" ] && [ ! -d "/data/adb/modules/$MODID" ] && [ ! -f "$MODPATH/system.prop" ]; then
+  ui_print "- Temp-root fresh install: applying without a reboot"
   export MODULE_HOT_INSTALL_REQUEST=true
   export MODULE_HOT_RUN_SCRIPT=hotinstall.sh
 fi
