@@ -78,6 +78,8 @@ android {
     buildTypes {
         debug {
             externalNativeBuild.cmake {
+                cFlags += "-DZYGISK_DEBUG"
+                cppFlags += "-DZYGISK_DEBUG"
                 arguments += "-DZKSU_VERSION=$verName-$verCode-$commitHash-debug"
             }
         }

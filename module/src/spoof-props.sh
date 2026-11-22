@@ -25,17 +25,14 @@ else
   exit 0
 fi
 
-# Defer debug/build properties to service.sh so early-boot adbd is never blocked on userdebug ROMs.
-is_late_prop() {
-  case "$1" in
-    ro.debuggable|ro.force.debuggable|ro.secure|ro.adb.secure|ro.build.type|ro.build.tags|sys.oem_unlock_allowed)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+# Wait until Android finishes booting so vendor HALs (such as OPlus/OnePlus fingerprint HAL
+# and TrustZone/TEE services) and early adbd initialize against the genuine boot state before
+# any global resetprop runs.
+waited=0
+while [ "$(run_resetprop_get sys.boot_completed)" != "1" ] && [ "$waited" -lt 120 ]; do
+  sleep 1
+  waited=$((waited + 1))
+done
 
 # OEM-specific bootloader/warranty properties and optional debug overrides:
 # rewrite only when the property already exists on the ROM so foreign vendor keys
@@ -143,19 +140,10 @@ while IFS= read -r line || [ -n "$line" ]; do
 
   has_entries=true
   [ "$key" = "ro.boot.vbmeta.digest" ] && has_vbmeta_digest=true
-
-  if [ "$STAGE" = "late" ]; then
-    if is_late_prop "$key"; then
-      apply_prop "$key" "$val"
-    fi
-  else
-    if ! is_late_prop "$key"; then
-      apply_prop "$key" "$val"
-    fi
-  fi
+  apply_prop "$key" "$val"
 done < "$SPOOF_FILE"
 
-if [ "$STAGE" != "late" ] && [ "$has_entries" = true ] && [ "$has_vbmeta_digest" = false ]; then
+if [ "$has_entries" = true ] && [ "$has_vbmeta_digest" = false ]; then
   cur_digest=$(run_resetprop_get "ro.boot.vbmeta.digest" || true)
   if ! is_valid_vbmeta_digest "$cur_digest" && [ -r /dev/urandom ]; then
     digest=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \t\n')

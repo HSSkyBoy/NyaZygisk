@@ -361,6 +361,14 @@ static int anonymize_ranges(const MapRange *ranges, int nr, bool clear_write_per
         // this process and have nothing to do with our module. Downgrading one of
         // those breaks its owner the next time it writes to memory it still believes
         // is writable.
+        if (ranges[i].prot & PROT_EXEC) {
+            // Flush the newly copied pages to PoU before mprotect/mremap publishes them
+            // at `addr`, eliminating any brief window where another thread could fetch
+            // stale data before the post-mremap VA invalidation completes.
+            __builtin___clear_cache(reinterpret_cast<char *>(copy),
+                                    reinterpret_cast<char *>(copy) + size);
+        }
+
         if (mprotect(copy, size, final_prot) != 0) {
             PLOGE("maps-spoof: set replacement permissions failed [%p, %p]", addr,
                   reinterpret_cast<void *>(ranges[i].end));

@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include "main.hpp"
 #include "types.hpp"
 
 // Forward declaration to break circular dependency
@@ -34,11 +35,8 @@ public:
     const char* prepare_aux_injection();
 
     /// Live-attach to this ABI's zygote and to system_server if they are already running
-    /// and not yet injected. Returns false when the daemon could not be made ready, which
-    /// is the only failure the caller can act on. A per-process attach happens in a
-    /// detached child, so its outcome is not reported back: the process is resumed
-    /// uninjected and the status file simply never shows it as injected.
-    bool rearm();
+    /// and not yet injected. Returns the immediate outcome without blocking the event loop.
+    RearmResult rearm();
 
     // Public methods for state modification
     const Status& get_status() const;
@@ -59,7 +57,7 @@ private:
     bool ensure_daemon_created(bool* started = nullptr);
 
     /// Fork off `tracer trace <pid> <mode_flag>` for one already-running process.
-    void attach_running(pid_t pid, const char* mode_flag, const char* what);
+    bool attach_running(pid_t pid, const char* mode_flag, const char* what);
 
     Status status_;
     StartCounter counter;
