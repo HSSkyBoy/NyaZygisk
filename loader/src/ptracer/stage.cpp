@@ -559,20 +559,30 @@ void fan_out(const char *script, bool async, bool ignore_disable) {
 
 // --- The stages ---------------------------------------------------------------------------
 
-/// Puts the injector where zygote can read it and starts the monitor, which seizes init and
-/// catches every zygote it forks from then on.
-bool install() { return stage_work_directory() && start_monitor(); }
-
 /// Waits for a monitor to own the control socket. The monitor initialises its ptrace handler
 /// before its socket handler, so an answer here also means init has been seized.
 bool wait_for_monitor() {
-    constexpr int kAttempts = 50;
-    constexpr useconds_t kDelayUs = 200 * 1000;
+    constexpr int kAttempts = 500;
+    constexpr useconds_t kDelayUs = 20 * 1000;
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
         if (monitor_is_running()) return true;
         usleep(kDelayUs);
     }
     return false;
+}
+
+/// Puts the injector where zygote can read it, starts the monitor, and waits until it owns
+/// the control socket (proving init has been seized). Without the wait, a fast boot or
+/// emulated soft reboot can leave post-fs-data and fork zygote before the backgrounded
+/// monitor finishes exec and PTRACE_SEIZE, and a standalone late-load can race its own
+/// immediate rearm against socket creation.
+bool install() {
+    if (!stage_work_directory() || !start_monitor()) return false;
+    if (!wait_for_monitor()) {
+        ERR("the monitor did not take the control socket");
+        return false;
+    }
+    return true;
 }
 
 /// init reaches zygote-start after post-fs-data, so there is normally no zygote to inject
@@ -645,16 +655,8 @@ int hot_install(const StageOptions &) {
     stop_monitor();
 
     SAY("starting the new monitor");
-    if (!install()) return EXIT_FAILURE;
-
-    // The new monitor answering its control socket is what says this install took, so it is
-    // waited for whether or not a restart follows. On a debug build it also orders that
-    // restart, which must not land before the monitor can catch the zygote it replaces.
-    // Together with the wait above this is at most 20 seconds, inside ksud's 30 second
-    // budget.
-    if (!wait_for_monitor()) {
-        ERR("the new monitor did not take the control socket, NeoZygisk will start on the "
-            "next boot");
+    if (!install()) {
+        ERR("NeoZygisk will start on the next boot");
         return EXIT_FAILURE;
     }
 
@@ -752,10 +754,10 @@ int run_stage(Stage stage, const StageOptions &options) {
 
     // Magisk sets this for its module scripts when its own Zygisk is on, the one case to
     // stand down for. Our injector sets it too, in the manager app, and `su` passes a
-    // caller's environment through, so a hot install inherits it with no Magisk in sight.
-    // Magisk's set_script_env puts the directory holding its binary on PATH in the same
-    // breath as it sets this, so the two arrive together.
-    if (getenv("ZYGISK_ENABLED") != nullptr && on_path("magisk")) {
+    // caller's environment through, so a hot install or emulated soft reboot inherits it
+    // with no Magisk in sight. Magisk's set_script_env puts the directory holding its binary
+    // on PATH in the same breath as it sets this, while ksud and apd announce themselves.
+    if (getenv("ZYGISK_ENABLED") != nullptr && !caller_fans_out() && on_path("magisk")) {
         SAY("Magisk's own Zygisk is enabled, standing down");
         return EXIT_SUCCESS;
     }

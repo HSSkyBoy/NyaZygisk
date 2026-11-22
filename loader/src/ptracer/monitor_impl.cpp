@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <csignal>
 #include <sstream>
 
@@ -66,7 +67,9 @@ void AppMonitor::write_abi_status_section(std::string &status_text, std::string 
     status_text += "\n\tdaemon";
     status_text += abi_name;
     status_text += ":";
-    if (daemon_status.daemon_running) {
+    if (tracing_state_ == EXITING) {
+        status_text += "\t❌ exited";
+    } else if (daemon_status.daemon_running) {
         status_text += "\t😋 running";
         // What the daemon reports about itself -- the root implementation and the
         // modules it loaded -- is a block of its own, not a continuation of this line.
@@ -198,6 +201,8 @@ void AppMonitor::request_stop(std::string reason) {
 
 void AppMonitor::request_exit() {
     LOGI("prepare for exit ...");
+    std::string sock_path = zygiskd::GetTmpPath() + "/" + AppMonitor::SOCKET_NAME;
+    unlink(sock_path.c_str());
     tracing_state_ = EXITING;
     monitor_stop_reason_ = "user requested";
     update_status();
@@ -392,7 +397,18 @@ bool AppMonitor::SigChldHandler::Init() {
     }
     // Only one process may trace init, so this is also what settles a race between two
     // monitors starting at once: the one that loses cannot do its job and says so.
-    if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == -1) {
+    // Retry briefly on EPERM in case a retiring monitor just unlinked its socket on the
+    // way out and the kernel is still finishing exit_ptrace() in do_exit().
+    bool seized = false;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == 0) {
+            seized = true;
+            break;
+        }
+        if (errno != EPERM) break;
+        usleep(25 * 1000);
+    }
+    if (!seized) {
         PLOGE("seize init");
         return false;
     }
@@ -678,7 +694,20 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
         // Force the process into a standard SIGSTOP state.
         kill(pid, SIGSTOP);
         ptrace(PTRACE_CONT, pid, 0, 0);
-        waitpid(pid, &status, __WALL);
+        for (;;) {
+            while (waitpid(pid, &status, __WALL) == -1 && errno == EINTR) {}
+            if (stopped_with(status, SIGSTOP, 0)) break;
+            if (WIFEXITED(status) || WIFSIGNALED(status)) break;
+            if (WIFSTOPPED(status)) {
+                int sig = (WPTEVENT(status) == 0) ? WSTOPSIG(status) : 0;
+                if (sig == SIGSTOP || sig == SIGTRAP) sig = 0;
+                LOGV("forwarding intermediate stop %s while halting target %d",
+                     parse_status(status).c_str(), pid);
+                ptrace(PTRACE_CONT, pid, 0, sig);
+                continue;
+            }
+            break;
+        }
 
         if (stopped_with(status, SIGSTOP, 0)) {
             LOGV("target %d halted, detaching monitor to allow injector seize", pid);
