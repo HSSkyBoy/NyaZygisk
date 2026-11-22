@@ -86,7 +86,8 @@ bool should_stand_down() {
 void set_selinux_context(const std::string &path, const char *ctx) {
     if (lsetxattr(path.c_str(), "security.selinux", ctx, strlen(ctx) + 1, 0) == -1 &&
         errno != ENOTSUP && errno != EOPNOTSUPP) {
-        PLOGW("stage: lsetxattr %s -> %s", path.c_str(), ctx);
+        LOGW("stage: lsetxattr %s -> %s failed: %s (%d)", path.c_str(), ctx, strerror(errno),
+             errno);
     }
 }
 
@@ -126,11 +127,11 @@ bool mkdir_p(const std::string &path, mode_t mode) {
 bool create_sys_perm(const std::string &dir) {
     if (!mkdir_p(dir, 0550)) return false;
     if (chmod(dir.c_str(), 0550) == -1) {
-        PLOGW("stage: chmod 0550 %s", dir.c_str());
+        LOGW("stage: chmod 0550 %s failed: %s (%d)", dir.c_str(), strerror(errno), errno);
     }
     set_selinux_context(dir, kSystemFileContext);
     if (chown(dir.c_str(), kAidSystem, kGidSystem) == -1) {
-        PLOGW("stage: chown system:system %s", dir.c_str());
+        LOGW("stage: chown system:system %s failed: %s (%d)", dir.c_str(), strerror(errno), errno);
     }
     return true;
 }
@@ -175,7 +176,7 @@ bool copy_file(const std::string &src, const std::string &dst, mode_t mode) {
     }
 
     if (ok && fchmod(out_fd, mode) == -1) {
-        PLOGW("stage: fchmod %s", dst.c_str());
+        LOGW("stage: fchmod %s failed: %s (%d)", dst.c_str(), strerror(errno), errno);
     }
     close(in_fd);
     if (close(out_fd) == -1) {
@@ -203,11 +204,11 @@ bool install_lib(const std::string &src, const std::string &dst) {
     if (!copy_file(src, tmp, 0644)) return false;
 
     if (chmod(tmp.c_str(), 0644) == -1) {
-        PLOGW("stage: chmod 0644 %s", tmp.c_str());
+        LOGW("stage: chmod 0644 %s failed: %s (%d)", tmp.c_str(), strerror(errno), errno);
     }
     set_selinux_context(tmp, kSystemFileContext);
     if (chown(tmp.c_str(), kAidSystem, kGidSystem) == -1) {
-        PLOGW("stage: chown system:system %s", tmp.c_str());
+        LOGW("stage: chown system:system %s failed: %s (%d)", tmp.c_str(), strerror(errno), errno);
     }
     if (rename(tmp.c_str(), dst.c_str()) == -1) {
         PLOGE("stage: rename %s -> %s", tmp.c_str(), dst.c_str());
@@ -297,11 +298,12 @@ bool bootstrap_monitor(const std::string &moddir) {
     }
     if (is_regular_file(dst_spoof)) {
         if (chmod(dst_spoof.c_str(), 0600) == -1) {
-            PLOGW("stage: chmod 0600 %s", dst_spoof.c_str());
+            LOGW("stage: chmod 0600 %s failed: %s (%d)", dst_spoof.c_str(), strerror(errno), errno);
         }
         set_selinux_context(dst_spoof, kSystemFileContext);
         if (chown(dst_spoof.c_str(), kAidRoot, kGidRoot) == -1) {
-            PLOGW("stage: chown root:root %s", dst_spoof.c_str());
+            LOGW("stage: chown root:root %s failed: %s (%d)", dst_spoof.c_str(), strerror(errno),
+                 errno);
         }
     }
 

@@ -438,7 +438,8 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
                 auto reply = static_cast<uint8_t>(res);
                 if (sendto(sock_fd_, &reply, sizeof(reply), MSG_DONTWAIT,
                            reinterpret_cast<const struct sockaddr *>(&peer), peer_len) == -1) {
-                    PLOGW("SocketHandler: sendto rearm reply");
+                    LOGW("SocketHandler: sendto rearm reply failed: %s (%d)", strerror(errno),
+                         errno);
                 }
             }
             break;
