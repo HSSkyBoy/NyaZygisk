@@ -70,25 +70,49 @@ listOf("Debug", "Release").forEach { variantCap ->
                 exec.result.get().assertNormalExitValue()
             }
             val profileArgs = if (isRelease) listOf("--release") else emptyList()
+            val releaseBuildStdArgs = if (isRelease) {
+                listOf("-Zbuild-std=std,panic_abort")
+            } else {
+                emptyList()
+            }
+            val releaseRustFlags = if (isRelease) {
+                mapOf(
+                    "RUSTFLAGS" to listOf(
+                        "-Zunstable-options",
+                        "-Cpanic=immediate-abort",
+                        "-C force-unwind-tables=no",
+                        "-C link-arg=-Wl,--gc-sections",
+                        "-C link-arg=-Wl,--icf=safe",
+                        "-C link-arg=-Wl,--pack-dyn-relocs=android",
+                    ).joinToString(" "),
+                )
+            } else {
+                emptyMap()
+            }
 
             // cargo-ndk wires the correct NDK linker/ar per ABI; one invocation builds every ABI.
             // Use the long `--platform` flag: it is stable across cargo-ndk 3.x and 4.x,
             // unlike the short flag which was renamed from `-p` to `-P` in 4.0.3.
             val cargoArgs = mutableListOf("cargo", "ndk", "--platform", androidMinSdkVersion.toString())
             (abiToTriple.keys - "riscv64").forEach { abi -> cargoArgs += listOf("-t", abi) }
-            cargoArgs += listOf("build", "--target-dir", targetDir.absolutePath) + profileArgs
-            runCargo(cargoArgs)
+            cargoArgs += listOf("build", "--target-dir", targetDir.absolutePath) + profileArgs + releaseBuildStdArgs
+            runCargo(cargoArgs, releaseRustFlags)
 
             // cargo-ndk does not know riscv64, so wire the NDK linker by hand. The target is
             // tier 3 in Rust (no prebuilt std) and the NDK only ships riscv64 sysroots from API 35.
             val cmdExt = if (prebuilt.name.contains("windows")) ".cmd" else ""
             val rvClang = File(binDir, "riscv64-linux-android35-clang$cmdExt").absolutePath
+            val rvBuildStdArgs = if (isRelease) {
+                releaseBuildStdArgs
+            } else {
+                listOf("-Zbuild-std=std,panic_abort")
+            }
             runCargo(
                 listOf(
                     "cargo", "build", "--target", abiToTriple.getValue("riscv64"),
-                    "-Zbuild-std=std,panic_abort", "--target-dir", targetDir.absolutePath,
-                ) + profileArgs,
-                mapOf(
+                    "--target-dir", targetDir.absolutePath,
+                ) + rvBuildStdArgs + profileArgs,
+                releaseRustFlags + mapOf(
                     "CARGO_TARGET_RISCV64_LINUX_ANDROID_LINKER" to rvClang,
                     "CC_riscv64_linux_android" to rvClang,
                     "AR_riscv64_linux_android" to File(binDir, "llvm-ar$exeExt").absolutePath,
@@ -106,7 +130,7 @@ listOf("Debug", "Release").forEach { variantCap ->
                 val symbolPath = File(symbolDir, "$abi/zygiskd.debug")
                 symbolPath.parentFile.mkdirs()
                 providers.exec { workingDir = abiDir; commandLine(objcopy.absolutePath, "--only-keep-debug", "zygiskd", symbolPath.absolutePath) }.result.get().assertNormalExitValue()
-                providers.exec { workingDir = abiDir; commandLine(strip.absolutePath, "--strip-all", "zygiskd") }.result.get().assertNormalExitValue()
+                providers.exec { workingDir = abiDir; commandLine(strip.absolutePath, "--strip-all", "-R", ".comment", "zygiskd") }.result.get().assertNormalExitValue()
                 providers.exec { workingDir = abiDir; commandLine(objcopy.absolutePath, "--add-gnu-debuglink", symbolPath.absolutePath, "zygiskd") }.result.get().assertNormalExitValue()
             }
         }

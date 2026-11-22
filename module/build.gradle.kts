@@ -90,6 +90,7 @@ androidComponents.onVariants { variant ->
         }
         into("lib") {
             from(project(":loader").layout.buildDirectory.dir("intermediates/stripped_native_libs/$variantLowered/strip${variantCapped}DebugSymbols/out/lib"))
+            include("**/libzygisk.so", "**/libzygisk_ptrace.so")
         }
 
         doLast {

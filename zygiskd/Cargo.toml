@@ -7,7 +7,7 @@ rust-version = "1.85"
 
 [dependencies]
 android_logger = "0.15"
-anyhow = { version = "1.0", features = ["backtrace"] }
+anyhow = "1.0"
 bitflags = { version = "2.13" }
 konst = "0.3"
 libc = "0.2"
