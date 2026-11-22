@@ -1,6 +1,7 @@
 #include "main.hpp"
 
 #include <err.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
@@ -17,6 +18,7 @@
 #include "daemon.hpp"  // For GetTmpPath
 #include "logging.hpp"
 #include "monitor.hpp"
+#include "stage.hpp"
 
 // Use string_view literals for efficient, allocation-free string comparisons.
 using namespace std::string_view_literals;
@@ -29,6 +31,20 @@ const char *const kWorkDirectory = STRINGIFY(WORK_DIRECTORY);
 #else
 const char *const kWorkDirectory = "/data/system_de/nyazygisk";
 #endif
+
+const char *rearm_result_name(RearmResult result) {
+    switch (result) {
+    case RearmResult::Injecting:
+        return "Injecting";
+    case RearmResult::AlreadyHooked:
+        return "AlreadyHooked";
+    case RearmResult::NoZygote:
+        return "NoZygote";
+    case RearmResult::Failed:
+        return "Failed";
+    }
+    return "Unknown";
+}
 
 // Fills in the address of the monitor's control socket.
 static void control_socket_addr(struct sockaddr_un &addr, socklen_t &socklen) {
@@ -48,7 +64,7 @@ static void control_socket_addr(struct sockaddr_un &addr, socklen_t &socklen) {
  * invariant in the monitor rather than in each caller -- every entry point may simply try
  * to start one, and a redundant monitor steps aside instead of fighting over init.
  */
-static bool monitor_is_running() {
+bool monitor_is_running() {
     int sockfd = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sockfd == -1) return false;
 
@@ -86,7 +102,7 @@ void init_monitor() {
 
 // The entry point for the command-line control utility. Returns false if no monitor could
 // be reached within the retry budget.
-bool send_control_command(Command cmd) {
+bool send_control_command(Command cmd, bool quiet) {
     // A caller may arrive while the monitor it depends on is still starting: on the
     // late-load path the bootstrap stage backgrounds the monitor and a later stage sends
     // `rearm`, with only the mount step in between. Retry rather than make every caller
@@ -104,7 +120,7 @@ bool send_control_command(Command cmd) {
 
         int sockfd = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (sockfd == -1) {
-            warn("socket");
+            if (!quiet) warn("socket");
             continue;
         }
 
@@ -113,23 +129,104 @@ bool send_control_command(Command cmd) {
         close(sockfd);
 
         if (nsend == static_cast<ssize_t>(sizeof(cmd))) {
-            printf("command sent\n");
+            if (!quiet) printf("command sent\n");
             return true;
         }
         if (nsend != -1) {
-            fprintf(stderr, "send %zd != %zu\n", nsend, sizeof(cmd));
+            if (!quiet) fprintf(stderr, "send %zd != %zu\n", nsend, sizeof(cmd));
             return false;
         }
         // ENOENT: the work directory has no socket yet. ECONNREFUSED: the file is there
         // but unbound, so the previous owner is gone. Both are worth waiting out.
         if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
             errno = saved_errno;
-            warn("send");
+            if (!quiet) warn("send");
             return false;
         }
     }
 
-    fprintf(stderr, "error: no monitor is listening on the control socket\n");
+    if (!quiet) fprintf(stderr, "error: no monitor is listening on the control socket\n");
+    return false;
+}
+
+bool send_rearm_command(RearmResult &result, bool quiet) {
+    constexpr int kRetries = 10;
+    constexpr useconds_t kRetryDelayUs = 200 * 1000;
+    constexpr int kReplyTimeoutMs = 3000;
+
+    struct sockaddr_un addr{};
+    socklen_t socklen;
+    control_socket_addr(addr, socklen);
+
+    Command cmd = REARM;
+    for (int attempt = 0; attempt < kRetries; ++attempt) {
+        if (attempt > 0) usleep(kRetryDelayUs);
+
+        int sockfd = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (sockfd == -1) {
+            if (!quiet) warn("socket");
+            continue;
+        }
+
+        struct sockaddr_un local{};
+        local.sun_family = AF_UNIX;
+        int name_len = snprintf(local.sun_path + 1, sizeof(local.sun_path) - 1,
+                                "nyazygisk_ctl_%d_%d", getpid(), attempt);
+        if (name_len <= 0 || static_cast<size_t>(name_len) >= sizeof(local.sun_path) - 1) {
+            close(sockfd);
+            return false;
+        }
+        socklen_t local_len =
+            static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
+        if (bind(sockfd, reinterpret_cast<struct sockaddr *>(&local), local_len) == -1) {
+            if (!quiet) warn("bind");
+            close(sockfd);
+            continue;
+        }
+
+        auto nsend = sendto(sockfd, &cmd, sizeof(cmd), 0, reinterpret_cast<struct sockaddr *>(&addr),
+                            socklen);
+        int saved_errno = errno;
+        if (nsend != static_cast<ssize_t>(sizeof(cmd))) {
+            close(sockfd);
+            if (nsend != -1) {
+                if (!quiet) fprintf(stderr, "send %zd != %zu\n", nsend, sizeof(cmd));
+                return false;
+            }
+            if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
+                errno = saved_errno;
+                if (!quiet) warn("send");
+                return false;
+            }
+            continue;
+        }
+
+        struct pollfd pfd{.fd = sockfd, .events = POLLIN, .revents = 0};
+        int ready = -1;
+        do {
+            ready = poll(&pfd, 1, kReplyTimeoutMs);
+        } while (ready == -1 && errno == EINTR);
+
+        if (ready > 0 && (pfd.revents & POLLIN)) {
+            uint8_t reply = static_cast<uint8_t>(RearmResult::Failed);
+            ssize_t nread = recv(sockfd, &reply, sizeof(reply), 0);
+            close(sockfd);
+            if (nread == static_cast<ssize_t>(sizeof(reply)) &&
+                reply <= static_cast<uint8_t>(RearmResult::Failed)) {
+                result = static_cast<RearmResult>(reply);
+                if (!quiet) printf("rearm: %s\n", rearm_result_name(result));
+                return true;
+            }
+            if (!quiet) fprintf(stderr, "error: invalid rearm reply from monitor\n");
+            return false;
+        }
+
+        close(sockfd);
+        if (!quiet) fprintf(stderr, "error: timed out waiting for rearm reply\n");
+        return false;
+    }
+
+    if (!quiet) fprintf(stderr, "error: no monitor is listening on the control socket\n");
     return false;
 }
 
@@ -165,7 +262,7 @@ static void handle_interrupt(int /*sig*/) {
  * @brief Main entry point for the NeoZygisk command-line interface.
  *
  * This function acts as a dispatcher, parsing the first command-line argument
- * to determine the desired mode of operation (e.g., monitor, trace, ctl)
+ * to determine the desired mode of operation (e.g., monitor, trace, ctl, stage, status)
  * and delegating the work to a corresponding handler function.
  */
 int main(int argc, char **argv) {
@@ -185,6 +282,10 @@ int main(int argc, char **argv) {
         return handle_trace(argc, argv);
     } else if (command == "ctl"sv) {
         return handle_ctl(argc, argv);
+    } else if (command == "stage"sv) {
+        return handle_stage(argc, argv);
+    } else if (command == "status"sv) {
+        return handle_status();
     } else if (command == "version"sv) {
         return handle_version();
     } else {
@@ -195,13 +296,11 @@ int main(int argc, char **argv) {
 }
 
 /**
- * @brief Prints the tool's version and usage information to standard error.
- *        Usage is typically printed in response to an error.
- * @param tool_name The name of the executable, typically argv[0].
+ * @brief Polls until the monitor has bound its control socket.
  */
-static bool wait_for_monitor() {
-    constexpr int kRetries = 120;
-    constexpr useconds_t kRetryDelayUs = 25 * 1000;
+bool wait_for_monitor() {
+    constexpr int kRetries = 150;
+    constexpr useconds_t kRetryDelayUs = 20 * 1000;
     for (int attempt = 0; attempt < kRetries; ++attempt) {
         if (monitor_is_running()) {
             return true;
@@ -215,7 +314,9 @@ static void print_usage(const char *tool_name) {
     fprintf(stderr, "NyaZygisk Tracer %s\n", ZKSU_VERSION);
     fprintf(stderr,
             "usage: %s monitor | trace <pid> [--spawn | --standalone | --system_server] | ctl "
-            "<start|stop|exit|rearm|wait> | version\n",
+            "<start|stop|exit|rearm|wait> | stage "
+            "<post-fs-data|post-mount|service|hotinstall|late-load|soft-reboot> | status | "
+            "version\n",
             tool_name);
 }
 
@@ -338,6 +439,12 @@ static int handle_ctl(int argc, char **argv) {
     }
     printf("sending control command: '%s'\n", argv[2]);
 
+    if (action == "rearm"sv) {
+        RearmResult result = RearmResult::Failed;
+        if (!send_rearm_command(result)) return EXIT_FAILURE;
+        return result == RearmResult::Failed ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
+
     Command cmd;
     if (action == "start"sv) {
         cmd = START;
@@ -345,15 +452,13 @@ static int handle_ctl(int argc, char **argv) {
         cmd = STOP;
     } else if (action == "exit"sv) {
         cmd = EXIT;
-    } else if (action == "rearm"sv) {
-        cmd = REARM;
     } else {
         fprintf(stderr, "error: unknown ctl action: '%s'\n", argv[2]);
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
-    // Report delivery, so a stage script can tell "the monitor acted on this" from "there
+    // Report delivery, so a caller can tell "the monitor acted on this" from "there
     // was no monitor to tell". The command itself is fire-and-forget past this point.
     return send_control_command(cmd) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

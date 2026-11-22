@@ -142,6 +142,10 @@ std::string get_comm(pid_t pid);
 /// \return The parent pid, or -1 if it could not be read.
 pid_t get_ppid(pid_t pid);
 
+/// \brief Reads the TracerPid field from /proc/<pid>/status.
+/// \return The tracer pid (0 if untraced), or -1 if it could not be read.
+pid_t get_tracer_pid(pid_t pid);
+
 /// \brief Reads /proc/<pid>/cmdline as the argument vector it stores.
 ///
 /// This is argv, not the thread name, so it does see the "zygote64" a zygote writes over
@@ -159,6 +163,9 @@ bool is_zygote_cmdline(pid_t pid);
 /// the one named "zygote64". Callers separate zygotes from system_server by comm, since
 /// system_server is a forked zygote and shares its executable.
 std::vector<pid_t> find_processes_by_exe(std::string_view exe);
+
+/// \brief Finds all running Android Zygote processes (64-bit and 32-bit) spawned by init.
+std::vector<pid_t> find_zygotes();
 
 /// \brief Tests whether \p pid already has a library whose path contains \p suffix mapped.
 /// This is how the rearm path recognises an already-injected process: it reads the

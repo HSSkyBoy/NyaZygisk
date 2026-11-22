@@ -307,7 +307,7 @@ void AppMonitor::request_exit() {
     event_loop_.Stop();
 }
 
-void AppMonitor::request_rearm() {
+RearmResult AppMonitor::request_rearm() {
     LOGI("rearm requested");
 
     // A rearm asks for injection, so lift a stop the monitor put itself into after a
@@ -316,12 +316,14 @@ void AppMonitor::request_rearm() {
         request_start();
     }
 
-    if (!zygote_.rearm()) {
+    auto result = zygote_.rearm();
+    if (result == RearmResult::Failed) {
         request_stop("rearm failed");
-        return;
+        return result;
     }
 
     update_status();
+    return result;
 }
 
 void AppMonitor::notify_init_detached() {
@@ -405,11 +407,14 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
         }
         buf_.resize(real_size);
         MsgHead &full_msg = *reinterpret_cast<MsgHead *>(buf_.data());
-        nread = recv(sock_fd_, &full_msg, real_size, 0);
+        struct sockaddr_un peer{};
+        socklen_t peer_len = sizeof(peer);
+        nread = recvfrom(sock_fd_, &full_msg, real_size, 0,
+                         reinterpret_cast<struct sockaddr *>(&peer), &peer_len);
         if (nread == -1) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            PLOGE("recv(read)");
+            PLOGE("recvfrom(read)");
             break;
         }
         if (static_cast<size_t>(nread) != real_size) {
@@ -427,9 +432,17 @@ void AppMonitor::SocketHandler::HandleEvent([[maybe_unused]] EventLoop &loop, ui
         case EXIT:
             monitor_.request_exit();
             break;
-        case REARM:
-            monitor_.request_rearm();
+        case REARM: {
+            auto res = monitor_.request_rearm();
+            if (peer_len > sizeof(sa_family_t)) {
+                auto reply = static_cast<uint8_t>(res);
+                if (sendto(sock_fd_, &reply, sizeof(reply), MSG_DONTWAIT,
+                           reinterpret_cast<const struct sockaddr *>(&peer), peer_len) == -1) {
+                    PLOGW("SocketHandler: sendto rearm reply");
+                }
+            }
             break;
+        }
         case ZYGOTE_INJECTED:
             monitor_.get_abi_manager().notify_injected();
             monitor_.update_status();

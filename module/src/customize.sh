@@ -112,7 +112,6 @@ extract "$ZIPFILE" 'post-fs-data.sh'           "$MODPATH"
 extract "$ZIPFILE" 'late-load.sh'              "$MODPATH"
 extract "$ZIPFILE" 'post-mount.sh'             "$MODPATH"
 extract "$ZIPFILE" 'hotinstall.sh'            "$MODPATH"
-extract "$ZIPFILE" 'zygisk-init.sh'            "$MODPATH"
 extract "$ZIPFILE" 'service.sh'                "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'              "$MODPATH"
 extract "$ZIPFILE" 'emulated-soft-reboot.sh'   "$MODPATH"
@@ -183,6 +182,7 @@ set_perm_recursive "$MODPATH/lib" 0 0 0755 0644 u:object_r:system_lib_file:s0
 set_perm_recursive "$MODPATH/lib64" 0 0 0755 0644 u:object_r:system_lib_file:s0
 set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
 set_perm "$MODPATH/spoof.prop" 0 0 0600
+set_perm "$MODPATH/late-load.sh" 0 0 0755
 
 # If Huawei's Maple is enabled, system_server is created with a special way which is out of Zygisk's control
 HUAWEI_MAPLE_ENABLED=$(grep_prop ro.maple.enable)

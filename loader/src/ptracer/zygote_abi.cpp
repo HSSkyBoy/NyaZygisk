@@ -138,7 +138,7 @@ bool ZygoteAbiManager::handle_daemon_exit_if_match(int pid, int process_status) 
     return false;
 }
 
-void ZygoteAbiManager::attach_running(pid_t pid, const char* mode_flag, const char* what) {
+bool ZygoteAbiManager::attach_running(pid_t pid, const char* mode_flag, const char* what) {
     LOGI("rearm: attaching to running %s (pid %d)", what, pid);
     auto child = fork_dont_care();
     if (child == 0) {
@@ -150,14 +150,16 @@ void ZygoteAbiManager::attach_running(pid_t pid, const char* mode_flag, const ch
         _exit(1);
     } else if (child == -1) {
         PLOGE("fork injector for %s", what);
+        return false;
     }
+    return true;
 }
 
-bool ZygoteAbiManager::rearm() {
+RearmResult ZygoteAbiManager::rearm() {
     bool daemon_started = false;
     if (!ensure_daemon_created(&daemon_started)) {
         LOGE("rearm: daemon%s is not running", abi_name_);
-        return false;
+        return RearmResult::Failed;
     }
 
     // A daemon that outlived a module refresh still holds the previous snapshot, so have it
@@ -199,7 +201,7 @@ bool ZygoteAbiManager::rearm() {
         // A normal boot reaches this on every post-mount, long before zygote exists. The
         // monitor is already seized on init and will catch it the usual way.
         LOGI("rearm: no running zygote for %s, nothing to attach", program_path_.c_str());
-        return true;
+        return RearmResult::NoZygote;
     }
 
     status_.supported = true;
@@ -208,13 +210,16 @@ bool ZygoteAbiManager::rearm() {
     // happens in a specialized child -- so its presence is a reliable injected marker here
     // and makes a repeated rearm a no-op.
     bool any_zygote_was_bare = false;
+    bool any_attach_launched = false;
     for (auto pid : zygote_pids) {
         if (has_library_mapped(pid, "libzygisk.so")) {
             LOGI("rearm: zygote (pid %d) is already injected, skipping", pid);
             status_.zygote_injected = true;
         } else {
             any_zygote_was_bare = true;
-            attach_running(pid, "--standalone", "zygote");
+            if (attach_running(pid, "--standalone", "zygote")) {
+                any_attach_launched = true;
+            }
         }
     }
 
@@ -238,5 +243,8 @@ bool ZygoteAbiManager::rearm() {
     }
 
     monitor_.update_status();
-    return true;
+    if (!any_zygote_was_bare) {
+        return RearmResult::AlreadyHooked;
+    }
+    return any_attach_launched ? RearmResult::Injecting : RearmResult::Failed;
 }

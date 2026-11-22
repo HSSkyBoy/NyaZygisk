@@ -897,6 +897,22 @@ pid_t get_ppid(pid_t pid) {
 }
 
 /**
+ * @brief Reads the TracerPid field from /proc/[pid]/status.
+ */
+pid_t get_tracer_pid(pid_t pid) {
+    std::string path = "/proc/" + std::to_string(pid) + "/status";
+    auto file = std::unique_ptr<FILE, decltype(&fclose)>(fopen(path.c_str(), "re"), &fclose);
+    if (file == nullptr) return -1;
+
+    char line[256];
+    while (fgets(line, sizeof(line), file.get()) != nullptr) {
+        int tracer = -1;
+        if (sscanf(line, "TracerPid: %d", &tracer) == 1) return tracer;
+    }
+    return -1;
+}
+
+/**
  * @brief Finds every live process whose /proc/[pid]/exe resolves to the given path.
  */
 std::vector<pid_t> find_processes_by_exe(std::string_view exe) {
@@ -928,6 +944,21 @@ std::vector<pid_t> find_processes_by_exe(std::string_view exe) {
     }
 
     return found;
+}
+
+/**
+ * @brief Finds all running Android Zygote processes (64-bit and 32-bit) spawned by init.
+ */
+std::vector<pid_t> find_zygotes() {
+    std::vector<pid_t> zygotes;
+    for (std::string_view exe : {"/system/bin/app_process64", "/system/bin/app_process32"}) {
+        for (auto pid : find_processes_by_exe(exe)) {
+            if (get_ppid(pid) == 1 && is_zygote_cmdline(pid)) {
+                zygotes.push_back(pid);
+            }
+        }
+    }
+    return zygotes;
 }
 
 /**

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "trace.hpp"
 
 void init_monitor();
@@ -20,3 +22,16 @@ enum Command {
     // late-load stage script or from a root shell on a build with no root solution.
     REARM = 8
 };
+
+enum class RearmResult : uint8_t {
+    Injecting = 0,
+    AlreadyHooked = 1,
+    NoZygote = 2,
+    Failed = 3,
+};
+
+const char *rearm_result_name(RearmResult result);
+bool monitor_is_running();
+bool wait_for_monitor();
+bool send_control_command(Command cmd, bool quiet = false);
+bool send_rearm_command(RearmResult &result, bool quiet = false);
