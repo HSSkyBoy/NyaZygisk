@@ -52,7 +52,9 @@ void AppMonitor::write_abi_status_section(std::string &status_text, const Status
         status_text += "\ndaemon_";
         status_text += abi_name;
         status_text += "_status=";
-        if (daemon_status.daemon_running) {
+        if (tracing_state_ == EXITING) {
+            status_text += "exited";
+        } else if (daemon_status.daemon_running) {
             status_text += "running";
             if (!daemon_status.daemon_info.empty()) {
                 status_text += "\n";
@@ -297,6 +299,8 @@ void AppMonitor::request_stop(std::string reason) {
 
 void AppMonitor::request_exit() {
     LOGI("prepare for exit ...");
+    std::string sock_path = zygiskd::GetTmpPath() + "/" + AppMonitor::SOCKET_NAME;
+    unlink(sock_path.c_str());
     tracing_state_ = EXITING;
     monitor_stop_reason_ = "user requested";
     update_status();

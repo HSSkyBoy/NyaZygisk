@@ -11,7 +11,9 @@
 DEBUG=@DEBUG@
 
 MODDIR=${0%/*}
-if [ "$ZYGISK_ENABLED" ]; then
+# Stand down only for Magisk's built-in Zygisk. NyaZygisk sets ZYGISK_ENABLED=1 inside
+# the manager app, and su / ksud soft-reboot inherit the manager's environment.
+if [ "$ZYGISK_ENABLED" ] && [ -z "$KSU$APATCH" ] && command -v magisk >/dev/null 2>&1; then
   exit 0
 fi
 

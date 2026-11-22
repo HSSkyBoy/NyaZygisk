@@ -3,7 +3,7 @@
 DEBUG=@DEBUG@
 
 MODDIR=${0%/*}
-if [ "$ZYGISK_ENABLED" ]; then
+if [ "$ZYGISK_ENABLED" ] && [ -z "$KSU$APATCH" ] && command -v magisk >/dev/null 2>&1; then
   exit 0
 fi
 

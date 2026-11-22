@@ -26,7 +26,7 @@ other_tracers() {
 
 waited=0
 while [ -n "$(other_tracers)" ] && [ "$waited" -lt 20 ]; do
-  sleep 0.2
+  sleep 0.2 2>/dev/null || sleep 1
   waited=$((waited + 1))
 done
 
