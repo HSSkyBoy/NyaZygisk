@@ -17,16 +17,23 @@ fi
 TRACER_NAME="${TRACER##*/}"
 "$TRACER" ctl exit >/dev/null 2>&1 || true
 
+other_tracers() {
+  for pid in $(pidof "$TRACER_NAME"); do
+    [ "$pid" = "$$" ] || [ "$pid" = "$PPID" ] && continue
+    echo "$pid"
+  done
+}
+
 waited=0
-while [ -n "$(pidof "$TRACER_NAME")" ] && [ "$waited" -lt 20 ]; do
+while [ -n "$(other_tracers)" ] && [ "$waited" -lt 20 ]; do
   sleep 0.2
   waited=$((waited + 1))
 done
 
 # Fallback if the control socket was unreachable or the monitor hung: terminate only
 # tracer processes running from our own module directory (or a stashed hot-install copy).
-if [ -n "$(pidof "$TRACER_NAME")" ]; then
-  for pid in $(pidof "$TRACER_NAME"); do
+if [ -n "$(other_tracers)" ]; then
+  for pid in $(other_tracers); do
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
     case "$exe" in
       "$MODDIR/bin/"*|*"/hot_install_trash/"*"/bin/$TRACER_NAME"*)
@@ -35,7 +42,7 @@ if [ -n "$(pidof "$TRACER_NAME")" ]; then
     esac
   done
   sleep 0.5
-  for pid in $(pidof "$TRACER_NAME"); do
+  for pid in $(other_tracers); do
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
     case "$exe" in
       "$MODDIR/bin/"*|*"/hot_install_trash/"*"/bin/$TRACER_NAME"*)

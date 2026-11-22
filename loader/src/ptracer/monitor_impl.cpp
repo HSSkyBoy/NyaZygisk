@@ -474,7 +474,20 @@ bool AppMonitor::SigChldHandler::Init() {
     }
     // Only one process may trace init, so this is also what settles a race between two
     // monitors starting at once: the one that loses cannot do its job and says so.
-    if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == -1) {
+    // Retry briefly on EPERM in case the previous monitor just unlinked its socket on the
+    // way out and the kernel is still finishing exit_ptrace() in do_exit().
+    bool seized = false;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == 0) {
+            seized = true;
+            break;
+        }
+        if (errno != EPERM) {
+            break;
+        }
+        usleep(25 * 1000);
+    }
+    if (!seized) {
         PLOGE("seize init");
         return false;
     }
