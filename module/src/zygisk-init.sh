@@ -45,21 +45,6 @@ FIRST_INIT=false
 
 create_sys_perm "$TMP_PATH"
 
-# Remove legacy /data/system/nyazygisk on cold boot (never during a live hot-install where
-# an older monitor may still be serving sockets there).
-if [ "$TMP_PATH" != "/data/system/nyazygisk" ] && [ -d "/data/system/nyazygisk" ] && [ "$(getprop sys.boot_completed)" != "1" ]; then
-  if [ ! -f "$TMP_PATH/config.prop" ] && [ -f "/data/system/nyazygisk/config.prop" ]; then
-    cp -af "/data/system/nyazygisk/config.prop" "$TMP_PATH/config.prop"
-    chmod 0644 "$TMP_PATH/config.prop"
-    chcon u:object_r:system_file:s0 "$TMP_PATH/config.prop"
-    chown system:system "$TMP_PATH/config.prop"
-  fi
-  if [ ! -f "$TMP_PATH/spoof.prop" ] && [ -f "/data/system/nyazygisk/spoof.prop" ]; then
-    cp -af "/data/system/nyazygisk/spoof.prop" "$TMP_PATH/spoof.prop"
-  fi
-  rm -rf "/data/system/nyazygisk"
-fi
-
 if [ "$FIRST_INIT" = true ] && [ ! -f "$TMP_PATH/spoof.prop" ] && [ -f "$MODDIR/spoof.prop" ]; then
   cp -af "$MODDIR/spoof.prop" "$TMP_PATH/spoof.prop"
 fi
@@ -90,3 +75,8 @@ fi
 # Unconditional: the monitor enforces the single-owner invariant itself and a redundant
 # one exits immediately, so neither this script nor a soft reboot has to probe for it.
 "$TRACER" monitor </dev/null >/dev/null 2>&1 &
+
+# Wait until the monitor has seized init and bound its control socket before returning.
+# Without this handshake, a fast soft reboot can fork zygote before the backgrounded
+# monitor finishes PTRACE_SEIZE on PID 1 and miss injection entirely.
+"$TRACER" ctl wait </dev/null >/dev/null 2>&1 || true

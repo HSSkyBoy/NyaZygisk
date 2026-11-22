@@ -806,7 +806,24 @@ bool AppMonitor::SigChldHandler::handleExecEvent(int pid, int &status) {
         // Force the process into a standard SIGSTOP state.
         kill(pid, SIGSTOP);
         ptrace(PTRACE_CONT, pid, 0, 0);
-        while (waitpid(pid, &status, __WALL) == -1 && errno == EINTR) {}
+        for (;;) {
+            while (waitpid(pid, &status, __WALL) == -1 && errno == EINTR) {}
+            if (stopped_with(status, SIGSTOP, 0)) {
+                break;
+            }
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                break;
+            }
+            if (WIFSTOPPED(status)) {
+                int sig = (WPTEVENT(status) == 0) ? WSTOPSIG(status) : 0;
+                if (sig == SIGSTOP || sig == SIGTRAP) sig = 0;
+                LOGV("forwarding intermediate stop %s while halting target %d",
+                     parse_status(status).c_str(), pid);
+                ptrace(PTRACE_CONT, pid, 0, sig);
+                continue;
+            }
+            break;
+        }
 
         if (stopped_with(status, SIGSTOP, 0)) {
             LOGV("target %d halted, detaching monitor to allow injector seize", pid);

@@ -681,19 +681,35 @@ static bool trace_with_seize(int pid, TraceMode mode, int *seize_errno) {
     ptrace(PTRACE_DETACH, pid, 0, 0);                                                              \
     return false;
 
-    // Wait for the initial Seize stop
-    if (!wait_for_process(pid, &status)) {
-        BAIL_AND_DETACH
-    }
-
-    // Determine the expected stop signal.
+    // Wait for the initial Seize stop, forwarding any unrelated signals that race ahead of it.
     // Spawn flow (already SIGSTOPped): SIGSTOP, with PTRACE_EVENT_STOP or plain event 0
     // if the target was already in a stopped state from the monitor hand-off.
     // Late flow (PTRACE_INTERRUPT):    SIGTRAP + PTRACE_EVENT_STOP
-    bool valid_stop = process_started
-                          ? STOPPED_WITH(SIGTRAP, PTRACE_EVENT_STOP)
-                          : (WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP &&
-                             ((status >> 16) == PTRACE_EVENT_STOP || (status >> 16) == 0));
+    bool valid_stop = false;
+    for (;;) {
+        if (!wait_for_process(pid, &status)) {
+            BAIL_AND_DETACH
+        }
+        valid_stop = process_started
+                         ? STOPPED_WITH(SIGTRAP, PTRACE_EVENT_STOP)
+                         : (WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP &&
+                            ((status >> 16) == PTRACE_EVENT_STOP || (status >> 16) == 0));
+        if (valid_stop) {
+            break;
+        }
+        if (WIFSTOPPED(status)) {
+            int sig = ((status >> 16) == 0) ? WSTOPSIG(status) : 0;
+            if (sig == SIGSTOP || sig == SIGTRAP) sig = 0;
+            LOGV("seize: forwarding intermediate stop %s on PID %d", parse_status(status).c_str(),
+                 pid);
+            if (ptrace(PTRACE_CONT, pid, 0, sig) == -1) {
+                PLOGE("ptrace(PTRACE_CONT) while waiting for initial stop on PID %d", pid);
+                BAIL_AND_DETACH
+            }
+            continue;
+        }
+        break;
+    }
 
     if (valid_stop) {
         arm_seccomp_events(pid, options);

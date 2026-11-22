@@ -199,11 +199,23 @@ int main(int argc, char **argv) {
  *        Usage is typically printed in response to an error.
  * @param tool_name The name of the executable, typically argv[0].
  */
+static bool wait_for_monitor() {
+    constexpr int kRetries = 120;
+    constexpr useconds_t kRetryDelayUs = 25 * 1000;
+    for (int attempt = 0; attempt < kRetries; ++attempt) {
+        if (monitor_is_running()) {
+            return true;
+        }
+        usleep(kRetryDelayUs);
+    }
+    return false;
+}
+
 static void print_usage(const char *tool_name) {
     fprintf(stderr, "NyaZygisk Tracer %s\n", ZKSU_VERSION);
     fprintf(stderr,
             "usage: %s monitor | trace <pid> [--spawn | --standalone | --system_server] | ctl "
-            "<start|stop|exit|rearm> | version\n",
+            "<start|stop|exit|rearm|wait> | version\n",
             tool_name);
 }
 
@@ -315,12 +327,15 @@ static int handle_trace(int argc, char **argv) {
  */
 static int handle_ctl(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "error: ctl command requires an action (start|stop|exit|rearm)\n");
+        fprintf(stderr, "error: ctl command requires an action (start|stop|exit|rearm|wait)\n");
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
     const auto action = std::string_view(argv[2]);
+    if (action == "wait"sv) {
+        return wait_for_monitor() ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     printf("sending control command: '%s'\n", argv[2]);
 
     Command cmd;
