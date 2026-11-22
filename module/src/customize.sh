@@ -122,24 +122,10 @@ mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 
 WORK_DIR="@WORK_DIRECTORY@"
 
-# Migrate WebUI config and spoof.prop to work directory
 mkdir -p "$WORK_DIR"
 chmod 0550 "$WORK_DIR"
 chcon u:object_r:system_file:s0 "$WORK_DIR"
 chown system:system "$WORK_DIR"
-
-if [ ! -f "$WORK_DIR/config.prop" ]; then
-  if [ -f "/data/system/nyazygisk/config.prop" ] && [ "$WORK_DIR" != "/data/system/nyazygisk" ]; then
-    ui_print "- Migrating WebUI config from /data/system/nyazygisk"
-    cp -af "/data/system/nyazygisk/config.prop" "$WORK_DIR/config.prop"
-  elif [ -f "/data/adb/nyazygisk/config.prop" ]; then
-    ui_print "- Migrating WebUI config from /data/adb/nyazygisk"
-    cp -af "/data/adb/nyazygisk/config.prop" "$WORK_DIR/config.prop"
-  elif [ -f "/data/adb/modules/zygisksu/config.prop" ]; then
-    ui_print "- Migrating WebUI config from /data/adb/modules/zygisksu"
-    cp -af "/data/adb/modules/zygisksu/config.prop" "$WORK_DIR/config.prop"
-  fi
-fi
 
 if [ -f "$WORK_DIR/config.prop" ]; then
   chmod 0644 "$WORK_DIR/config.prop"
@@ -147,29 +133,14 @@ if [ -f "$WORK_DIR/config.prop" ]; then
   chown system:system "$WORK_DIR/config.prop"
 fi
 
-if [ ! -f "$WORK_DIR/spoof.prop" ]; then
-  if [ -f "/data/system/nyazygisk/spoof.prop" ] && [ "$WORK_DIR" != "/data/system/nyazygisk" ]; then
-    ui_print "- Migrating spoof.prop from /data/system/nyazygisk"
-    cp -af "/data/system/nyazygisk/spoof.prop" "$WORK_DIR/spoof.prop"
-  elif [ -f "/data/adb/modules/zygisksu/spoof.prop" ]; then
-    ui_print "- Migrating spoof.prop from /data/adb/modules/zygisksu"
-    cp -af "/data/adb/modules/zygisksu/spoof.prop" "$WORK_DIR/spoof.prop"
-  elif [ -f "$MODPATH/spoof.prop" ]; then
-    cp -af "$MODPATH/spoof.prop" "$WORK_DIR/spoof.prop"
-  fi
+if [ ! -f "$WORK_DIR/spoof.prop" ] && [ -f "$MODPATH/spoof.prop" ]; then
+  cp -af "$MODPATH/spoof.prop" "$WORK_DIR/spoof.prop"
 fi
 
 if [ -f "$WORK_DIR/spoof.prop" ]; then
   chmod 0600 "$WORK_DIR/spoof.prop"
   chcon u:object_r:system_file:s0 "$WORK_DIR/spoof.prop"
   chown root:root "$WORK_DIR/spoof.prop"
-fi
-
-# Clean up legacy /data/adb/nyazygisk directory if present.
-# Legacy /data/system/nyazygisk may still hold the live daemon socket during an in-place
-# upgrade; zygisk-init.sh removes it cleanly on the next cold boot.
-if [ -d "/data/adb/nyazygisk" ]; then
-  rm -rf "/data/adb/nyazygisk"
 fi
 
 mkdir "$MODPATH/bin"

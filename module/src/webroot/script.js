@@ -481,8 +481,7 @@ function formatRootInfo(rootData, fallback) {
 function formatRomInfo(rom) {
   const oplus = rom["ro.build.version.oplusrom.display"] || rom["ro.build.version.oplusrom"];
   if (oplus) {
-    const normalized = oplus.replace(/OxygenOS/gi, "ColorOS");
-    return /[a-z]{2,}/i.test(normalized) ? normalized : `ColorOS ${normalized.replace(/^V/i, "")}`;
+    return /[a-z]{2,}/i.test(oplus) ? oplus : `ColorOS ${oplus.replace(/^V/i, "")}`;
   }
   const hyperos = rom["ro.mi.os.version.name"];
   if (hyperos) {

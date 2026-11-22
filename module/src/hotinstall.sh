@@ -39,9 +39,6 @@ if "$TRACER" ctl exit >/dev/null 2>&1; then
     sleep 1
     waited=$((waited + 1))
   done
-elif [ "@WORK_DIRECTORY@" != "/data/system/nyazygisk" ] && [ -S "/data/system/nyazygisk/init_monitor" ] && [ -n "$(pidof "${TRACER##*/}")" ]; then
-  echo "- Work directory migrated to @WORK_DIRECTORY@; reboot to activate the new version"
-  exit 0
 fi
 
 # Unconditional, as everywhere else: a monitor that finds the control socket still owned
